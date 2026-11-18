@@ -346,7 +346,23 @@ async function withEdge(edge, profile, url, flags, check) {
       // Runtime.evaluate can briefly lose its execution context during a page transition.
       return reply.result?.result?.value;
     }
-    await check(evaluate, send);
+    function nextEvent(method) {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          socket.removeEventListener('message', receive);
+          reject(new Error('DevTools did not emit ' + method));
+        }, 5000);
+        function receive(event) {
+          const message = JSON.parse(event.data);
+          if (message.method !== method) return;
+          clearTimeout(timeout);
+          socket.removeEventListener('message', receive);
+          resolve(message.params);
+        }
+        socket.addEventListener('message', receive);
+      });
+    }
+    await check(evaluate, send, nextEvent);
   } finally {
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ id: 99999, method: 'Browser.close' }));

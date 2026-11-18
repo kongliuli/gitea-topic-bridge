@@ -311,10 +311,36 @@ func TestGiteaLocalLab(t *testing.T) {
 		t.Fatalf("Gitea did not enforce the required status check: %+v", statusBlocked.Members[2].Merge)
 	}
 	api("POST", "/repos/labowner/no-match/statuses/"+second.Head.SHA, map[string]string{"state": "success", "context": "fixture/required"}, nil, 201)
-	postLabTopic(t, writer, mergeURL(batch.Members[0]), writerURL, "", confirmMerge(first.Head.SHA), 200)
 	conflictPull := readMergeTarget(repos[1], batch.Members[1], false)
-	postLabTopic(t, writer, mergeURL(batch.Members[1]), writerURL, "", confirmMerge(conflictPull.Head.SHA), 200)
-	mergedBatch := postLabTopic(t, writer, mergeURL(batch.Members[2]), writerURL, "", confirmMerge(second.Head.SHA), 200)
+	useEdge := os.Getenv("BRIDGE_TEST_EDGE_BINARY") != ""
+	edgeFixture := edgeMergeFixture{
+		BridgeURL: writerURL, GiteaURL: base, Username: "labreviewer", Password: reviewerPassword,
+		Topic: batch.Topic, TopicID: batch.ID,
+	}
+	readBatch := func() TopicChangeSet {
+		t.Helper()
+		raw := loadLabPage(t, writer, writerURL+"/bridge/api/topics/"+batch.ID, nil, 200)
+		var result TopicChangeSet
+		if err := json.Unmarshal([]byte(raw), &result); err != nil || len(result.Members) != len(batch.Members) {
+			t.Fatalf("unexpected saved topic after browser operation: %v", err)
+		}
+		return result
+	}
+	var mergedBatch TopicChangeSet
+	if useEdge {
+		edgeFixture.Targets = []edgeMergeTarget{
+			{Repository: repos[0].Name, HeadSHA: first.Head.SHA},
+			{Repository: repos[1].Name, HeadSHA: conflictPull.Head.SHA, Blocked: true},
+			{Repository: repos[2].Name, HeadSHA: second.Head.SHA},
+		}
+		runEdgeScript(t, mergeBrowserNavigation, edgeFixture)
+		mergedBatch = readBatch()
+		t.Log("Edge confirmed each real merge dialog and showed two verified merges and one blocked repository.")
+	} else {
+		postLabTopic(t, writer, mergeURL(batch.Members[0]), writerURL, "", confirmMerge(first.Head.SHA), 200)
+		postLabTopic(t, writer, mergeURL(batch.Members[1]), writerURL, "", confirmMerge(conflictPull.Head.SHA), 200)
+		mergedBatch = postLabTopic(t, writer, mergeURL(batch.Members[2]), writerURL, "", confirmMerge(second.Head.SHA), 200)
+	}
 	for _, index := range []int{0, 2} {
 		actual := readMergeTarget(repos[index], batch.Members[index], false)
 		evidence := mergedBatch.Members[index].Merge
@@ -346,7 +372,16 @@ func TestGiteaLocalLab(t *testing.T) {
 
 	planned = mergedBatch.Members[2]
 	postLabTopic(t, writer, revertURL(planned), "https://untrusted.invalid", "", revertBody(planned), 403)
-	opened := postLabTopic(t, writer, revertURL(planned), writerURL, "", revertBody(planned), 200)
+	var opened TopicChangeSet
+	if useEdge {
+		edgeFixture.Targets = nil
+		edgeFixture.RevertMergeSHA = planned.Merge.MergeSHA
+		runEdgeScript(t, mergeBrowserNavigation, edgeFixture)
+		opened = readBatch()
+		t.Log("Edge confirmed the reverse PR dialog and opened the actual Gitea PR through the approval link.")
+	} else {
+		opened = postLabTopic(t, writer, revertURL(planned), writerURL, "", revertBody(planned), 200)
+	}
 	revert := opened.Members[2].Revert
 	if revert == nil || revert.State != "opened" || revert.PullNumber < 1 || revert.InverseSHA == "" {
 		t.Fatalf("reverse PR not created: %+v", revert)
@@ -375,6 +410,7 @@ func TestGiteaLocalLab(t *testing.T) {
 		map[string]string{"event": "APPROVED", "body": "Independent approval for reverse PR"}, nil, 200)
 	labAPI(t, base, reviewerToken, "POST", inverseMergePath, map[string]string{"do": "merge", "head_commit_id": revert.InverseSHA}, nil, 200)
 	api("GET", "/repos/labowner/no-match/contents/bridge-source.txt?ref=main", nil, nil, 404)
+	t.Log("Gitea rejected the reverse PR before independent approval and merged it only after another account approved.")
 	api("DELETE", "/repos/labowner/conflict/collaborators/labreader", nil, nil, 204)
 	overview = readOverview(browser, projectURL)
 	if len(overview) != 2 || overview[0].Repository.ID != repos[0].ID || overview[1].Repository.ID != repos[2].ID {

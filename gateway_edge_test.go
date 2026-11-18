@@ -30,11 +30,6 @@ func TestSCMHostedStackEdge(t *testing.T) {
 
 func verifyGatewayInEdge(t *testing.T, trustedClient *http.Client, fixture edgeGatewayFixture) {
 	t.Helper()
-	edge := edgeForTest(t)
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Fatal("the live browser test requires Node.js with built-in WebSocket")
-	}
 	gateway, err := url.Parse(fixture.Gateway)
 	if err != nil || gateway.Scheme != "https" || gateway.User != nil || fixture.Username == "" || fixture.Password == "" ||
 		(gateway.Hostname() != "127.0.0.1" && gateway.Hostname() != "git.office.example") {
@@ -51,29 +46,84 @@ func verifyGatewayInEdge(t *testing.T, trustedClient *http.Client, fixture edgeG
 	// Permit only the leaf key already authenticated against the temporary CA.
 	// This scopes the Chromium exception to this fixture's Edge process.
 	pin := sha256.Sum256(response.TLS.PeerCertificates[0].RawSubjectPublicKeyInfo)
-	payload, err := json.Marshal(struct {
+	runEdgeScript(t, gatewayBrowserNavigation, struct {
 		edgeGatewayFixture
 		Pin string
 	}{fixture, base64.StdEncoding.EncodeToString(pin[:])})
+	t.Log("Edge followed both Gitea menus, approved a fresh OAuth grant, rendered the original saved topic and project overview, and reopened the same receipt after a fresh sign-in.")
+}
+
+func runEdgeScript(t *testing.T, script string, fixture any) {
+	t.Helper()
+	edge := edgeForTest(t)
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("the live browser test requires Node.js with built-in WebSocket")
+	}
+	payload, err := json.Marshal(fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
-	browser := exec.CommandContext(ctx, node, "--input-type=module", "-e", gatewayBrowserNavigation, edge, t.TempDir())
+	browser := exec.CommandContext(ctx, node, "--input-type=module", "-e", script, edge, t.TempDir())
 	browser.Stdin = bytes.NewReader(payload)
 	browser.WaitDelay = 2 * time.Second
 	if output, err := browser.CombinedOutput(); err != nil {
 		t.Fatalf("live Edge navigation failed: %v\n%s", err, output)
 	}
-	t.Log("Edge followed both Gitea menus, approved a fresh OAuth grant, rendered the original saved topic and project overview, and reopened the same receipt after a fresh sign-in.")
 }
 
-const gatewayBrowserNavigation = edgeDevTools + `
+const edgeOAuth = edgeDevTools + `
+async function readBrowserFixture() {
+  let input = '';
+  for await (const part of process.stdin.setEncoding('utf8')) input += part;
+  return JSON.parse(input);
+}
+
+async function authorize(evaluate, gitea, { Username, Password }, returnURL, selector, text, firstGrant = false) {
+  const state = () => evaluate((site, target, field, number) => {
+    if (location.href === target && document.querySelector(field)?.innerText.includes(number)) return 'returned';
+    if (location.origin !== site) return false;
+    if (document.querySelector('form[action="/login/oauth/grant"]')) return 'consent';
+    if (location.pathname === '/user/login' && document.querySelector('input[name="user_name"]')?.form) return 'credentials';
+    return false;
+  }, gitea, returnURL, selector, text);
+  await waitForPage('Bridge login link', () => evaluate(
+    url => location.href === url && !!document.querySelector('#login:not([hidden])'), returnURL));
+  await evaluate(url => {
+    if (location.href !== url) throw new Error('unexpected Bridge sign-in page');
+    document.querySelector('#login').click();
+  }, returnURL);
+  let step = await waitForPage('Gitea OAuth flow', state);
+  if (step === 'credentials') {
+    await evaluate((site, username, password) => {
+      if (location.origin !== site || location.pathname !== '/user/login') throw new Error('unexpected login origin');
+      const user = document.querySelector('input[name="user_name"]');
+      if (new URL(user.form.action, location.href).origin !== site) throw new Error('unexpected login submission');
+      user.value = username;
+      user.form.querySelector('input[name="password"]').value = password;
+      user.form.requestSubmit();
+    }, gitea, Username, Password);
+    step = await waitForPage('Gitea login result', async () => {
+      const result = await state();
+      return result !== 'credentials' && result;
+    });
+  }
+  if (firstGrant && step !== 'consent') throw new Error('the new viewer did not see OAuth consent');
+  if (step === 'consent') {
+    await evaluate(site => {
+      if (location.origin !== site) throw new Error('unexpected consent origin');
+      document.querySelector('form[action="/login/oauth/grant"] [name="granted"][value="true"]').click();
+    }, gitea);
+  }
+  await waitForPage('OAuth return to the original URL and data', async () => await state() === 'returned');
+}
+`
+
+const gatewayBrowserNavigation = edgeOAuth + `
 const [edge, profile] = process.argv.slice(1);
-let input = '';
-for await (const part of process.stdin.setEncoding('utf8')) input += part;
-const config = JSON.parse(input);
+const config = await readBrowserFixture();
 const { Gateway: origin, TopicID: topicID, Topic: topic, ReceiptID: receiptID } = config;
 const hostname = new URL(origin).hostname;
 const flags = ['--ignore-certificate-errors-spki-list=' + config.Pin];
@@ -96,46 +146,11 @@ await withEdge(edge, profile, origin + '/', flags, async (evaluate, send) => {
     await evaluate(route => document.querySelector('a[href="' + route + '"]').click(), path);
   }
 
-  async function authorize(returnURL, selector, firstGrant = false) {
-    const state = () => evaluate((site, target, field, number) => {
-      if (location.origin !== site) return false;
-      if (location.href === target && document.querySelector(field)?.innerText.includes(number)) return 'returned';
-      if (document.querySelector('form[action="/login/oauth/grant"]')) return 'consent';
-      if (location.pathname === '/user/login' && document.querySelector('input[name="user_name"]')?.form) return 'credentials';
-      return false;
-    }, origin, returnURL, selector, topic);
-    await wait('Bridge login link', url => location.href === url && !!document.querySelector('#login:not([hidden])'), returnURL);
-    await evaluate(() => document.querySelector('#login').click());
-    let step = await waitForPage('Gitea OAuth flow', state);
-    if (step === 'credentials') {
-      await evaluate((site, username, password) => {
-        if (location.origin !== site || location.pathname !== '/user/login') throw new Error('unexpected login origin');
-        const user = document.querySelector('input[name="user_name"]');
-        if (new URL(user.form.action, location.href).origin !== site) throw new Error('unexpected login submission');
-        user.value = username;
-        user.form.querySelector('input[name="password"]').value = password;
-        user.form.requestSubmit();
-      }, origin, config.Username, config.Password);
-      step = await waitForPage('Gitea login result', async () => {
-        const result = await state();
-        return result !== 'credentials' && result;
-      });
-    }
-    if (firstGrant && step !== 'consent') throw new Error('the new viewer did not see OAuth consent');
-    if (step === 'consent') {
-      await evaluate(site => {
-        if (location.origin !== site) throw new Error('unexpected consent origin');
-        document.querySelector('form[action="/login/oauth/grant"] [name="granted"][value="true"]').click();
-      }, origin);
-    }
-    await waitForPage('OAuth return to the original URL and data', async () => await state() === 'returned');
-  }
-
   await openMenu('/bridge/');
   await wait('anonymous dashboard after menu click', site =>
     location.href === site + '/bridge/' && !!document.querySelector('#login:not([hidden])'), origin);
   await goTo(dashboard);
-  await authorize(dashboard, '#saved-topic', true);
+  await authorize(evaluate, origin, config, dashboard, '#saved-topic', topic, true);
   await wait('saved topic repository', () => document.querySelector('#results h2')?.textContent === 'labowner/fixture');
   await wait('authenticated dashboard', () => !!document.querySelector('#overview:not([hidden])'));
   await evaluate(() => document.querySelector('#overview summary').click());
@@ -167,7 +182,7 @@ await withEdge(edge, profile, origin + '/', flags, async (evaluate, send) => {
 
   await send('Network.clearBrowserCookies');
   await goTo(receiptURL);
-  await authorize(receiptURL, '#receipt');
+  await authorize(evaluate, origin, config, receiptURL, '#receipt', topic);
   await wait('same receipt after fresh OAuth', details, topic, receiptID, config.Anchored);
 });
 `

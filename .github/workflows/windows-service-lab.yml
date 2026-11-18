@@ -48,12 +48,18 @@ jobs:
         run: |
           $env:BRIDGE_TEST_GITEA_BINARY = "$env:RUNNER_TEMP\gitea-28.4.0.exe"
           go test -v -count=1 -timeout 2m -run '^TestGiteaPilotMigrationLab$' .
-      - name: Exercise Service Control Manager
+      - name: Exercise real merge and reverse PR dialogs in Edge
         shell: pwsh
         run: |
           $env:BRIDGE_TEST_EDGE_BINARY = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'
           if (-not (Test-Path -LiteralPath $env:BRIDGE_TEST_EDGE_BINARY -PathType Leaf)) { throw 'Edge was not found on the Windows runner.' }
           if ((& node -p 'typeof WebSocket') -ne 'function') { throw 'Node.js must support built-in WebSocket.' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "BRIDGE_TEST_EDGE_BINARY=$env:BRIDGE_TEST_EDGE_BINARY"
+          $env:BRIDGE_TEST_GITEA_BINARY = "$env:RUNNER_TEMP\gitea-28.4.0.exe"
+          go test -v -count=1 -timeout 4m -run '^TestGiteaLocalLab$' .
+      - name: Exercise Service Control Manager
+        shell: pwsh
+        run: |
           $bins = @{
             Executable = "$env:RUNNER_TEMP\bridge-scm-lab.exe"
             GiteaExecutable = "$env:RUNNER_TEMP\gitea-28.4.0.exe"
