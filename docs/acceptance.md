@@ -111,11 +111,18 @@ go test -v -run '^Test(PartialMerge|ReceiptIssue)Edge$' -count=1 ./...
 
 从同一 HTTPS 入口保存联调单并签发回执，验签并与制品 SHA-256 比对。清空客户端会话后，原回执接口返回 `401`。重新经过 Gitea OAuth 回到同一条回执及联调单，签名 JSON 仍能用原公钥核验，Markdown 指向同一 Topic。
 
+两种地址还使用真实 Edge 演练。一个新建的只读协作者从 Gitea 菜单打开联调看板，在浏览器里首次同意授权，返回原联调单，再展开项目总览核对提交链接。从 Gitea 菜单进入回执中心后，按 ID 打开并检查版本历史和导出入口。清空浏览器会话后，再次登录会回到同一回执详情。
+
+同一流程在 Windows Server 2025 的四服务部署上通过，并在 Edge 中核对了回执的「独立存证已核验」状态和凭证下载入口。[真实浏览器验收记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44397294905)
+
 测试只在客户端进程内信任临时 CA。Windows Git 保留证书链和主机名校验，因该临时 CA 没有吊销端点，单条克隆命令关闭 Schannel 吊销检查。没有修改 Windows 信任库或 Git 全局配置。实际办公网 DNS、公网域名证书、跨主机访问、tailnet 与防火墙仍须在部署环境验证。Caddy 二进制来自 [v2.11.9 发布包](https://github.com/caddyserver/caddy/releases/tag/v2.11.9)，Windows amd64 ZIP 的 SHA-256 为 `ad93112d335ee687100c4c9f11bced16ca590377976b7fe7883882b9e797e472`。
+
+Edge 使用临时用户配置，先由测试客户端按临时 CA 验证证书和主机名，再只在该 Edge 进程放行这张测试证书的公钥。域名用进程内映射指向回环网关。
 
 ```powershell
 $env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
 $env:BRIDGE_TEST_CADDY_BINARY = 'C:\path\to\caddy.exe'
+$env:BRIDGE_TEST_EDGE_BINARY = 'C:\path\to\msedge.exe' # 网页步骤需要带内置 WebSocket 的 Node.js
 go test -v -timeout 3m -run '^TestGiteaGatewayTLS$' -count=1 ./...
 ```
 
