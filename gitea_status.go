@@ -67,7 +67,7 @@ func (client *Gitea) inspectPull(ctx context.Context, repoURL *url.URL, repoID i
 		Base         struct {
 			RepoID int64 `json:"repo_id"`
 		}
-		Head struct{ SHA string }
+		Head apiPullBranch
 	}
 	if _, err := client.get(ctx, endpoint, &detail); err != nil {
 		return err
@@ -75,7 +75,7 @@ func (client *Gitea) inspectPull(ctx context.Context, repoURL *url.URL, repoID i
 	if detail.Base.RepoID != repoID {
 		return ErrNotVisible
 	}
-	if detail.Number != pull.Number || detail.Head.SHA != pull.HeadSHA || detail.Merged != (pull.Lifecycle == "merged") || (pull.Lifecycle == "open") != (detail.State == "open") {
+	if detail.Number != pull.Number || detail.Head.SHA != pull.HeadSHA || detail.Head.RepoID != pull.sourceRepoID || detail.Merged != (pull.Lifecycle == "merged") || (pull.Lifecycle == "open") != (detail.State == "open") {
 		return errors.New("pull request changed between list and detail")
 	}
 	if detail.ChangedFiles != nil && *detail.ChangedFiles >= 0 {

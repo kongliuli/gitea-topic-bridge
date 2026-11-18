@@ -105,6 +105,19 @@ async function lookup() {
     }
     if (!response.ok) throw new Error('lookup failed');
     const data = await response.json();
+    let forks = [];
+    let forkListUnavailable = false;
+    if (writesEnabled && data.repositories.length) {
+      try {
+        const sourceOptions = await fetch(`/bridge/api/projects/${encodeURIComponent(params.get('project_id'))}/forks`, { signal: query.signal });
+        if (sourceOptions.status === 401) return requireLogin();
+        if (!sourceOptions.ok) throw new Error('fork lookup failed');
+        forks = await sourceOptions.json();
+      } catch {
+        if (query.signal.aborted) return;
+        forkListUnavailable = true;
+      }
+    }
     if (!query.signal.aborted) {
       const picked = [];
       showResults(data, (card, repo) => {
@@ -115,9 +128,26 @@ async function lookup() {
         included.checked = true;
         const source = inputRow(choices, '源分支（可留空）', 'text');
         const target = inputRow(choices, '目标分支（可留空）', 'text');
-        picked.push({ repo, included, source, target });
+        const matches = forks.filter((fork) => fork.target_repository_id === repo.id);
+        let forkSelect;
+        if (matches.length) {
+          const label = element('label', '源仓库');
+          forkSelect = document.createElement('select');
+          const same = element('option', '目标仓内分支');
+          same.value = '';
+          forkSelect.append(same);
+          for (const entry of matches) {
+            const option = element('option', `${entry.source.owner}/${entry.source.name}`);
+            option.value = entry.source.id;
+            forkSelect.append(option);
+          }
+          label.append(forkSelect);
+          choices.prepend(label);
+        }
+        picked.push({ repo, included, source, target, forkSelect });
         card.append(choices);
       });
+      if (forkListUnavailable) message.textContent += ' · 暂时无法读取可用 Fork。';
       if (storeEnabled && data.repositories.length) {
         draft = {
           params,
@@ -150,12 +180,14 @@ save.addEventListener('click', async () => {
   if (!submitted) return;
   const members = writesEnabled ? submitted.picked.filter((item) => item.included.checked).map((item) => ({
     repository_id: item.repo.id,
+    source_repository_id: item.forkSelect?.value ? Number(item.forkSelect.value) : undefined,
     source_branch: item.source.value.trim(),
     target_branch: item.target.value.trim(),
   })) : submitted.repos;
   savedTopic.hidden = false;
-  if (!members.length || members.some((member) => Boolean(member.source_branch) !== Boolean(member.target_branch))) {
-    savedTopic.textContent = '至少选一个仓库。源分支和目标分支请同时填写，或同时留空。';
+  if (!members.length || members.some((member) => Boolean(member.source_branch) !== Boolean(member.target_branch) ||
+      member.source_repository_id && !member.source_branch)) {
+    savedTopic.textContent = '至少选一个仓库。选 Fork 时必须填写源分支和目标分支。';
     return;
   }
   const body = JSON.stringify({ project_id: submitted.params.get('project_id'), topic: submitted.params.get('topic'), members });
@@ -174,7 +206,7 @@ save.addEventListener('click', async () => {
       return;
     }
     if (response.status === 400) {
-      savedTopic.textContent = '请检查联调单输入。源分支与目标分支不能相同，分支名不能含空格。';
+      savedTopic.textContent = '请检查分支格式。同一仓的源分支与目标分支不能相同。';
       return;
     }
     if (!response.ok) throw new Error('save failed');
@@ -218,7 +250,8 @@ async function openSavedTopic(id, note = '') {
       const member = memberByRepo.get(repo.id);
       if (!member?.source_branch || !member.target_branch) return;
       const status = [operationStates[member.state] ?? '未知', reasons[member.result_code]].filter(Boolean).join(' · ');
-      card.append(element('p', `${member.source_branch} → ${member.target_branch} · ${status}`));
+      const source = member.source_repository_id ? `Fork #${member.source_repository_id}:${member.source_branch}` : member.source_branch;
+      card.append(element('p', `${source} → ${member.target_branch} · ${status}`));
       if (member.pull_number) {
         const repoResult = repos.find((item) => item.repository.id === repo.id);
         const pull = repoResult.pull_requests.find((item) => item.number === member.pull_number);

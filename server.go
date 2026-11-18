@@ -14,9 +14,15 @@ import (
 )
 
 type Project struct {
-	ID           string       `json:"id"`
-	Name         string       `json:"name"`
-	Repositories []Repository `json:"repositories"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Repositories []Repository  `json:"repositories"`
+	Forks        []ProjectFork `json:"forks,omitempty"`
+}
+
+type ProjectFork struct {
+	TargetID int64      `json:"target_repository_id"`
+	Source   Repository `json:"source"`
 }
 
 type ServerConfig struct {
@@ -89,6 +95,17 @@ func NewServer(config ServerConfig) (http.Handler, error) {
 			}
 			seen[repo.ID] = true
 		}
+		sources := make(map[int64]bool)
+		if len(project.Forks) > 64 {
+			return nil, errors.New("too many project forks")
+		}
+		for _, entry := range project.Forks {
+			if _, err := repoVerifier.repoURL(entry.Source); err != nil || !seen[entry.TargetID] || seen[entry.Source.ID] || sources[entry.Source.ID] ||
+				strings.Contains(entry.Source.Owner, "..") || strings.Contains(entry.Source.Name, "..") {
+				return nil, errors.New("invalid or duplicate project fork")
+			}
+			sources[entry.Source.ID] = true
+		}
 		server.projects[project.ID] = project
 	}
 	mux := http.NewServeMux()
@@ -106,6 +123,7 @@ func NewServer(config ServerConfig) (http.Handler, error) {
 	}
 	if config.EnablePullCreation {
 		mux.HandleFunc("POST /bridge/api/topics/{id}/pulls", server.withUser(server.createTopicPulls))
+		mux.HandleFunc("GET /bridge/api/projects/{id}/forks", server.withUser(server.listProjectForks))
 	}
 	if config.EnableMerge {
 		mux.HandleFunc("POST /bridge/api/topics/{id}/members/{member}/merge", server.withUser(server.mergeTopicMember))
@@ -243,7 +261,10 @@ func (server *Server) lookupTopic(writer http.ResponseWriter, request *http.Requ
 		server.upstreamProblem(writer, request, err)
 		return
 	}
-	results, err = client.inspectMatches(request.Context(), results)
+	results, err = server.visibleForkPulls(request.Context(), client, project, results)
+	if err == nil {
+		results, err = client.inspectMatches(request.Context(), results)
+	}
 	if err != nil {
 		server.upstreamProblem(writer, request, err)
 		return

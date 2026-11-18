@@ -60,6 +60,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	ownerToken, _ := createUser("labowner", "all", "--admin")
 	readerToken, readerPassword := createUser("labreader", "read:repository,read:user")
 	reviewerToken, reviewerPassword := createUser("labreviewer", "write:repository,read:user")
+	forkToken, forkPassword := createUser("labfork", "write:repository,read:user")
 	api := func(method, path string, data, out any, status int) {
 		t.Helper()
 		labAPI(t, base, ownerToken, method, path, data, out, status)
@@ -386,6 +387,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	loadLabPage(t, browser, lookupURL, nil, 401)
 	checkHookLab(t, hookStore, "pull_request", repos[0].ID, merged, actualMerge.SHA, "")
 	checkHookLab(t, hookStore, "release", repos[0].ID, release.ID, actualMerge.SHA, "build/v1")
+	verifyForkLab(t, base, ownerToken, forkToken, forkPassword, repos)
 	recovery.verifyRestored(t)
 }
 
@@ -413,7 +415,7 @@ json_extract(observation, '$.status') IN ('merged', 'published') LIMIT 1`, kind,
 	t.Fatalf("Gitea %s callback not verified: %d queued; last error %q", kind, jobs, failure)
 }
 
-func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, repos []Repository, recovery *receiptRecoveryLab) (*http.Client, string) {
+func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, repos []Repository, recovery *receiptRecoveryLab, forks ...ProjectFork) (*http.Client, string) {
 	t.Helper()
 	database := filepath.Join(t.TempDir(), "bridge.db")
 	store, err := OpenTopicStore(context.Background(), database)
@@ -472,10 +474,10 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 		"name": "Topic Bridge Lab", "confidential_client": true, "redirect_uris": []string{bridgeURL + "/bridge/auth/callback"},
 	}, &creds, 201)
 	config := ServerConfig{PublicBaseURL: bridgeURL + "/bridge/", GiteaPublicURL: giteaURL, GiteaAPIURL: giteaURL,
-		ClientID: creds.ID, ClientSecret: creds.Secret, AllowLoopbackHTTP: true, PageSize: 1, MaxPages: 3,
+		ClientID: creds.ID, ClientSecret: creds.Secret, AllowLoopbackHTTP: true, PageSize: 1, MaxPages: 8,
 		TopicStore: store, EnablePullCreation: true, EnableMerge: true, EnableRevert: true,
 		Receipts: receipts,
-		Projects: []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
+		Projects: []Project{{ID: "lab", Name: "Lab", Repositories: repos, Forks: forks}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
 	}
 	handler, err := NewServer(config)
 	if err != nil {

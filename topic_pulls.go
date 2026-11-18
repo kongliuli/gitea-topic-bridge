@@ -47,7 +47,8 @@ func (server *Server) createTopicPulls(writer http.ResponseWriter, request *http
 	denied := make([]int64, 0)
 	for _, memberID := range input.MemberIDs {
 		index, exists := indexByMember[memberID]
-		if !exists || seen[memberID] || !validBranch(topic.Members[index].SourceBranch) || !validBranch(topic.Members[index].TargetBranch) || topic.Members[index].SourceBranch == topic.Members[index].TargetBranch {
+		if !exists || seen[memberID] || !validBranch(topic.Members[index].SourceBranch) || !validBranch(topic.Members[index].TargetBranch) ||
+			(topic.Members[index].SourceRepositoryID == 0 && topic.Members[index].SourceBranch == topic.Members[index].TargetBranch) {
 			responseProblem(writer, http.StatusBadRequest, "invalid_pull_selection")
 			return
 		}
@@ -97,8 +98,12 @@ func (server *Server) processMemberPull(ctx context.Context, client *Gitea, acto
 		_, err := save("failed", code, 0)
 		return err
 	}
+	source := repo
 	permission := func() (bool, error) {
-		err := client.verifyRepoWrite(ctx, repo)
+		err := client.verifyPullDestination(ctx, repo, member.SourceRepositoryID == 0)
+		if err == nil && member.SourceRepositoryID > 0 {
+			source, err = client.memberFork(ctx, server.projects[topic.ProjectID], member, true)
+		}
 		switch {
 		case err == nil:
 			return true, nil
@@ -138,7 +143,7 @@ func (server *Server) processMemberPull(ctx context.Context, client *Gitea, acto
 	if err != nil || !claimed {
 		return err
 	}
-	number, status, err := client.createMemberPull(ctx, repo, topic, member, actorID)
+	number, status, err := client.createMemberPull(ctx, repo, source, topic, member, actorID)
 	switch {
 	case err != nil:
 		return nil

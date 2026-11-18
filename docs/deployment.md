@@ -22,6 +22,8 @@ Bridge 用 Gitea OAuth2 授权码、PKCE 与 state。固定回调 `/bridge/auth/
 3. 使用 Go 1.26 或以上版本，在仓库目录执行 `go build -o bridge.exe ./cmd/bridge`。从安全的启动环境设置 `BRIDGE_OAUTH_CLIENT_SECRET`，再执行 `.\bridge.exe -config C:\path\to\bridge.json`。默认监听 `127.0.0.1:3001`，通过网关访问 `/bridge/`。不要把密钥写进配置或提交到 Git。
 4. 初装先以前台运行，确认配置和回环入口正常，再注册 Windows 服务。会话只保留在内存，最长一小时，进程重启须重新登录。`allow_loopback_http` 仅用于隔离实验，非回环 HTTP 不允许。
 
+跨 Fork 提交需在项目的 `forks` 数组填写目标仓数字 ID 和已存在的直接 Fork（见示例配置）。Fork 不会自动加入目标仓列表。启用建 PR 后，只有能读取目标、能写源仓的用户才会看到该选项；移走配置、删除源仓或撤销其读权限后，Bridge 不再显示对应 PR、联调单或原回执。
+
 ### 注册 Windows 服务
 
 在测试机上为 Bridge、Gitea、Caddy 和可选存证服务分别准备低权限账号。Bridge 账号只读程序目录和配置，读取制品，且只对自己的数据库、快照及日志目录有写权限；不得接触 Gitea 裸仓和独立存证目录。Gitea 和 Caddy 分别按 [Gitea 服务文档](https://docs.gitea.com/installation/windows-service/) 与 [Caddy 服务文档](https://caddyserver.com/docs/running#windows-service) 注册，设置自己的账号与目录，不照搬默认 LocalSystem。

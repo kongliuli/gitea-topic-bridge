@@ -30,7 +30,7 @@ func (client *Gitea) mergePullDetail(ctx context.Context, endpoint *url.URL, rep
 	if pull.Base.RepoID != repo.ID {
 		return mergePullDetail{}, ErrNotVisible
 	}
-	if pull.Number != member.PullNumber || pull.Head.RepoID != repo.ID || pull.Head.Label != member.SourceBranch || pull.Base.Ref != member.TargetBranch {
+	if pull.Number != member.PullNumber || pull.Head.RepoID != member.pullSourceID() || pull.Head.Label != member.SourceBranch || pull.Base.Ref != member.TargetBranch {
 		return mergePullDetail{}, errPullChanged
 	}
 	return pull, nil

@@ -36,7 +36,7 @@ func (client *Gitea) canReadReceiptRelease(ctx context.Context, repo Repository,
 }
 
 func (client *Gitea) receiptSource(ctx context.Context, repo Repository, member TopicMember, selected receiptSourceSelection) (receiptMember, error) {
-	result := receiptMember{Repository: repo, Status: "unverified"}
+	result := receiptMember{Repository: repo, SourceRepositoryID: member.SourceRepositoryID, Status: "unverified"}
 	endpoint, err := client.repoURL(repo)
 	if err != nil {
 		return result, err

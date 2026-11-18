@@ -87,6 +87,17 @@ func (server *Server) listReceipts(writer http.ResponseWriter, request *http.Req
 				visible = false
 				break
 			}
+			if member.SourceRepositoryID != 0 {
+				_, err := client.memberFork(ctx, server.projects[topic.ProjectID], TopicMember{RepositoryID: repo.ID, SourceRepositoryID: member.SourceRepositoryID}, false)
+				if errors.Is(err, ErrNotVisible) {
+					visible = false
+					break
+				}
+				if err != nil {
+					server.receiptProblem(writer, request, err)
+					return
+				}
+			}
 			if member.Source != nil && member.Source.Kind == "release" {
 				err := client.canReadReceiptRelease(ctx, repo, member.Source.ObjectID)
 				if errors.Is(err, ErrNotVisible) {

@@ -39,10 +39,11 @@ type receiptScope struct {
 }
 
 type receiptMember struct {
-	Repository Repository         `json:"repository"`
-	Status     string             `json:"status"`
-	Source     *sourceObservation `json:"source,omitempty"`
-	Changes    *receiptChanges    `json:"changes,omitempty"`
+	Repository         Repository         `json:"repository"`
+	SourceRepositoryID int64              `json:"source_repository_id,omitempty"`
+	Status             string             `json:"status"`
+	Source             *sourceObservation `json:"source,omitempty"`
+	Changes            *receiptChanges    `json:"changes,omitempty"`
 }
 
 type receiptChanges struct {

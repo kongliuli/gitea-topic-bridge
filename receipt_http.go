@@ -121,6 +121,7 @@ func (server *Server) loadAuthorizedReceipt(ctx context.Context, client *Gitea, 
 	members := make([]TopicMember, len(doc.Members))
 	for index, member := range doc.Members {
 		members[index].RepositoryID = member.Repository.ID
+		members[index].SourceRepositoryID = member.SourceRepositoryID
 	}
 	repos, err := server.authorizedTopicRepos(ctx, client, TopicChangeSet{ProjectID: doc.ProjectID, Members: members})
 	if err != nil {

@@ -16,6 +16,9 @@
       "repositories": [
         { "id": 101, "owner": "engineering", "name": "cad-client" },
         { "id": 102, "owner": "engineering", "name": "cad-api" }
+      ],
+      "forks": [
+        { "target_repository_id": 101, "source": { "id": 201, "owner": "developer1", "name": "cad-client" } }
       ]
     }
   ]

@@ -26,6 +26,10 @@ var (
 )
 
 func (client *Gitea) verifyRepoWrite(ctx context.Context, repo Repository) error {
+	return client.verifyPullDestination(ctx, repo, true)
+}
+
+func (client *Gitea) verifyPullDestination(ctx context.Context, repo Repository, requirePush bool) error {
 	endpoint, err := client.repoURL(repo)
 	if err != nil {
 		return err
@@ -41,7 +45,7 @@ func (client *Gitea) verifyRepoWrite(ctx context.Context, repo Repository) error
 	if details.ID != repo.ID {
 		return ErrNotVisible
 	}
-	if details.Mirror == nil || details.Archived == nil || *details.Mirror || *details.Archived || !details.Permissions.Push {
+	if details.Mirror == nil || details.Archived == nil || *details.Mirror || *details.Archived || requirePush && !details.Permissions.Push {
 		return errCannotWriteRepo
 	}
 	return nil
@@ -66,7 +70,7 @@ func (client *Gitea) findMemberPull(ctx context.Context, repo Repository, topic 
 			return 0, err
 		}
 		for _, pull := range page.PullRequests {
-			if pull.sourceRepoID != repo.ID || pull.sourceBranch != member.SourceBranch || pull.targetBranch != member.TargetBranch {
+			if pull.sourceRepoID != member.pullSourceID() || pull.sourceBranch != member.SourceBranch || pull.targetBranch != member.TargetBranch {
 				continue
 			}
 			matching := strings.Contains(pull.Title, tag) || strings.Contains(pull.Body, tag)
@@ -98,15 +102,19 @@ func (client *Gitea) findMemberPull(ctx context.Context, repo Repository, topic 
 	return 0, errPullScanLimit
 }
 
-func (client *Gitea) createMemberPull(ctx context.Context, repo Repository, topic TopicChangeSet, member TopicMember, actorID int64) (int64, int, error) {
+func (client *Gitea) createMemberPull(ctx context.Context, repo, source Repository, topic TopicChangeSet, member TopicMember, actorID int64) (int64, int, error) {
 	endpoint, err := client.repoURL(repo)
 	if err != nil {
 		return 0, 0, err
 	}
 	marker := memberMarker(topic.ID, member)
+	head := "refs/heads/" + member.SourceBranch
+	if source.ID != repo.ID {
+		head = source.Owner + "/" + source.Name + ":" + head
+	}
 	response, err := client.postJSON(ctx, endpoint.JoinPath("pulls"), map[string]any{
 		"title": "[Topic: " + topic.Topic + "] " + member.SourceBranch + " → " + member.TargetBranch,
-		"body":  marker, "base": member.TargetBranch, "head": member.SourceBranch,
+		"body":  marker, "base": "refs/heads/" + member.TargetBranch, "head": head,
 		"allow_maintainer_edit": false,
 	})
 	if err != nil {
@@ -125,7 +133,7 @@ func (client *Gitea) createMemberPull(ctx context.Context, repo Repository, topi
 		Base, Head apiPullBranch
 	}
 	if err != nil || len(body) > maxPayload || json.Unmarshal(body, &row) != nil || row.Number <= 0 || row.User.ID != actorID ||
-		row.Base.RepoID != repo.ID || row.Head.RepoID != repo.ID || row.Base.Ref != member.TargetBranch || row.Head.Label != member.SourceBranch ||
+		row.Base.RepoID != repo.ID || row.Head.RepoID != member.pullSourceID() || row.Base.Ref != member.TargetBranch || row.Head.Label != member.SourceBranch ||
 		!hasMemberMarker(row.Body, marker) {
 		return 0, response.StatusCode, errors.New("Gitea did not confirm creation for the expected branches and user")
 	}

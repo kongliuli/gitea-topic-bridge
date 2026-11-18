@@ -50,7 +50,7 @@ func TestBrowserOAuthAndLookup(t *testing.T) {
 			fmt.Fprint(writer, `{"id":41}`)
 		case "/api/v1/repos/team/open/pulls":
 			writer.Header().Set("X-Total-Count", "2")
-			fmt.Fprint(writer, `[{"number":1,"title":"<b>fix</b>","body":"[Topic: CAD-01] private body","state":"open","base":{"repo_id":41}}]`)
+			fmt.Fprint(writer, `[{"number":1,"title":"<b>fix</b>","body":"[Topic: CAD-01] private body","state":"open","base":{"repo_id":41},"head":{"repo_id":41}}]`)
 		case "/api/v1/repos/team/hidden":
 			writer.WriteHeader(404)
 		default:

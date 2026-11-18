@@ -26,9 +26,10 @@ type topicSelection struct {
 	ProjectID string `json:"project_id"`
 	Topic     string `json:"topic"`
 	Members   []struct {
-		RepositoryID int64  `json:"repository_id"`
-		SourceBranch string `json:"source_branch,omitempty"`
-		TargetBranch string `json:"target_branch,omitempty"`
+		RepositoryID       int64  `json:"repository_id"`
+		SourceRepositoryID int64  `json:"source_repository_id,omitempty"`
+		SourceBranch       string `json:"source_branch,omitempty"`
+		TargetBranch       string `json:"target_branch,omitempty"`
 	} `json:"members,omitempty"`
 }
 
@@ -82,6 +83,11 @@ func (server *Server) authorizedTopicRepos(ctx context.Context, client *Gitea, t
 		if !visible {
 			return nil, ErrNotVisible
 		}
+		if member.SourceRepositoryID > 0 {
+			if _, err := client.memberFork(ctx, project, member, false); err != nil {
+				return nil, err
+			}
+		}
 		repos = append(repos, repo)
 	}
 	return repos, nil
@@ -123,12 +129,14 @@ func (server *Server) createTopic(writer http.ResponseWriter, request *http.Requ
 	topic := TopicChangeSet{ProjectID: input.ProjectID, Topic: input.Topic, CreatorID: user.ID, CreatedAt: time.Now().UTC()}
 	var previousRepoID int64
 	for _, member := range input.Members {
-		hasBranches := member.SourceBranch != "" || member.TargetBranch != ""
-		if member.RepositoryID <= previousRepoID || (hasBranches && (!validBranch(member.SourceBranch) || !validBranch(member.TargetBranch) || member.SourceBranch == member.TargetBranch)) {
+		hasBranches := member.SourceBranch != "" || member.TargetBranch != "" || member.SourceRepositoryID != 0
+		if member.SourceRepositoryID < 0 || member.SourceRepositoryID == member.RepositoryID ||
+			member.RepositoryID <= previousRepoID || (hasBranches && (!validBranch(member.SourceBranch) || !validBranch(member.TargetBranch) ||
+			(member.SourceRepositoryID == 0 && member.SourceBranch == member.TargetBranch))) {
 			responseProblem(writer, http.StatusBadRequest, "invalid_member")
 			return
 		}
-		topic.Members = append(topic.Members, TopicMember{RepositoryID: member.RepositoryID, SourceBranch: member.SourceBranch, TargetBranch: member.TargetBranch})
+		topic.Members = append(topic.Members, TopicMember{RepositoryID: member.RepositoryID, SourceRepositoryID: member.SourceRepositoryID, SourceBranch: member.SourceBranch, TargetBranch: member.TargetBranch})
 		previousRepoID = member.RepositoryID
 	}
 	payload, err := json.Marshal(input)
@@ -227,6 +235,9 @@ func (server *Server) getTopic(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	results, err := Lookup(ctx, client, repos, topic.Topic, server.config.MaxPages)
+	if err == nil {
+		results, err = server.visibleForkPulls(ctx, client, server.projects[topic.ProjectID], results)
+	}
 	if err == nil {
 		results, err = client.inspectMatches(ctx, results)
 	}
