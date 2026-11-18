@@ -127,10 +127,7 @@ func main() {
 		log.Fatal("service -config must be absolute")
 	}
 	if *logFile != "" {
-		if !filepath.IsAbs(*logFile) {
-			log.Fatal("-log-file must be absolute")
-		}
-		file, err := os.OpenFile(*logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		file, err := options.openProcessLog(*logFile)
 		if err != nil {
 			log.Fatal(err)
 		}

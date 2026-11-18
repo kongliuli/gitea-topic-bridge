@@ -55,6 +55,8 @@ Start-Service -Name GiteaTopicBridge
 
 命令末尾的反引号表示换行。需要 Webhook 时额外传 `-HookListen '127.0.0.1:3002'`。独立存证改用 `-AnchorDatabase` 替代 `-Config`，另选服务名、账号、密钥文件和端口。注册脚本不会覆盖已有服务，也不会立即启动；可先用 `-WhatIf`。服务以延迟自动启动，失败后依次等 5、30、120 秒再启动；用 `sc.exe qfailure GiteaTopicBridge` 核对。所有监听绑定完成后才报告 Running；停止时不再接新请求并等待后台任务退出。预留日志容量并单独做轮转。回滚注册可先 `Stop-Service -Name GiteaTopicBridge` 再 `sc.exe delete GiteaTopicBridge`，不会删除业务文件。
 
+`-LogFile` 使用独立日志目录中的绝对路径。程序启动时会拒绝把配置、密钥、存证 CA、数据库和 SQLite 附属文件当成日志，也会拒绝在收件与回执快照目录内写日志。遇到路径校验失败时先检查前台启动输出或服务启动状态，再修正路径后重试。
+
 ### 内部 Webhook
 
 启用时，在已有 Bridge 数据库配置下添加 `-hook-listen 127.0.0.1:3002`。启动环境提供两个独立密钥：`BRIDGE_WEBHOOK_SECRET`（至少 32 字节的随机共享密钥）及 `BRIDGE_WEBHOOK_READER_TOKEN`（专用非管理员账号，只授予白名单仓的读取权限，令牌只给 `read:repository`）。两者都不得进入 Git、日志或浏览器。内部回调必须直连 `http://127.0.0.1:3002/internal/hooks/gitea`；不监听公网，不交给 Caddy 或 Tailscale 转发。
