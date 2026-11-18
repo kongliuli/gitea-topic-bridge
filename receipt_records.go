@@ -117,7 +117,7 @@ func (store *TopicStore) receiptByRequest(ctx context.Context, who int64, key st
 	return []byte(data), hash, err
 }
 
-func (store *TopicStore) insertReceipt(ctx context.Context, document receiptDocument, key, hash string, data []byte) error {
+func (store *TopicStore) insertReceipt(ctx context.Context, document receiptDocument, key, hash string, data []byte, anchor bool) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -146,6 +146,11 @@ func (store *TopicStore) insertReceipt(ctx context.Context, document receiptDocu
 INSERT INTO delivery_receipts(id, topic_id, previous_id, issuer_id, request_key, request_hash, envelope)
 VALUES (?, ?, ?, ?, ?, ?, ?)`, document.ID, document.TopicID, previous, document.IssuerID, key, hash, string(data)); err != nil {
 		return err
+	}
+	if anchor {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO receipt_anchor_outbox(receipt_id) VALUES(?)`, document.ID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

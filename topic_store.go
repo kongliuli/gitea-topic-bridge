@@ -42,6 +42,18 @@ type TopicMember struct {
 }
 
 func OpenTopicStore(ctx context.Context, path string) (*TopicStore, error) {
+	db, err := openLocalDatabase(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := prepareTopicStore(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &TopicStore{db: db}, nil
+}
+
+func openLocalDatabase(path string) (*sql.DB, error) {
 	if !filepath.IsAbs(path) || strings.HasPrefix(filepath.ToSlash(path), "//") {
 		return nil, errors.New("database path must be an absolute local path")
 	}
@@ -56,11 +68,7 @@ func OpenTopicStore(ctx context.Context, path string) (*TopicStore, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if err := prepareTopicStore(ctx, db); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return &TopicStore{db: db}, nil
+	return db, nil
 }
 
 func prepareTopicStore(ctx context.Context, db *sql.DB) error {
@@ -115,7 +123,7 @@ PRAGMA user_version=1;`); err != nil {
 			return err
 		}
 		fallthrough
-	case 1, 2, 3, 4, 5, 6:
+	case 1, 2, 3, 4, 5, 6, 7:
 		if version != 0 && applicationID != bridgeApplicationID {
 			return errors.New("database is not owned by Bridge")
 		}
@@ -213,9 +221,28 @@ PRAGMA user_version=6;`); err != nil {
 			return err
 		}
 	}
+	if version < 7 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE receipt_anchor_outbox (
+    receipt_id TEXT PRIMARY KEY REFERENCES delivery_receipts(id),
+    available_at_ns INTEGER NOT NULL DEFAULT 0,
+    lease TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    proof TEXT
+) STRICT;
+CREATE INDEX receipt_anchor_pending ON receipt_anchor_outbox(available_at_ns) WHERE proof IS NULL;
+PRAGMA user_version = 7;`); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	return enableWAL(ctx, db)
+}
+
+func enableWAL(ctx context.Context, db *sql.DB) error {
 	var journal string
 	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode=WAL`).Scan(&journal); err != nil {
 		return err

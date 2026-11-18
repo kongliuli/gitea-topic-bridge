@@ -34,7 +34,15 @@ Bridge 用 Gitea OAuth2 授权码、PKCE 与 state。固定回调 `/bridge/auth/
 
 从安全启动环境设置 `BRIDGE_RECEIPT_SIGNING_SEED` 为 32 字节密码学随机种子的标准 Base64。种子不是密码，必须保密并做离线备份；当前服务只识别一个签发公钥，不支持在线轮换。用 `/bridge/api/receipt-key` 查看公钥与指纹，经独立可信渠道分发，不要用回执自带数据建立信任。离线验签：`.\bridge.exe -verify-receipt C:/path/receipt.json -trusted-receipt-key <可信公钥Base64>`。该命令验 JSON，不验文件；另对快照目录 `<回执ID>/<slot>.blob` 计算 SHA-256，与签名快照的对应项比对。
 
-回执签名不等于独立存证。当前未接独立只追加存储；签名 JSON 明确标注。备份时暂停签发，先停 Bridge，再一起保全 SQLite 和快照目录；断电或数据库写入状态不明可能留下无对应记录的快照目录，人工核对后才可清理。
+回执签名不等于独立存证。备份时暂停签发，先停 Bridge，再一起保全 SQLite 和快照目录；断电或数据库写入状态不明可能留下无对应记录的快照目录，人工核对后才可清理。
+
+#### 独立存证服务
+
+在另一个权限边界运行同一二进制的存证模式：`.\bridge.exe -anchor-db D:/Anchor/anchor.db -listen 127.0.0.1:3003`。使用不同的服务账户和独立存储，推荐单独主机与备份账户；Bridge 账户不得读取或写入账本目录，不得访问存证私钥。存证进程从安全环境读取 `BRIDGE_ANCHOR_SIGNING_SEED`（与回执密钥不同的 32 字节随机种子、标准 Base64）及 `BRIDGE_ANCHOR_BEARER`（至少 32 字符的随机共享令牌）。启动日志显示存证服务的公钥。
+
+在 Bridge 的 `receipts` 顶层配置内增加 `"anchor":{"url":"https://anchor.example.com/v1/anchors","public_key":"<可信存证公钥Base64>"}`，只经独立网关转发该 POST 路由，不将存证服务挂在 Gitea 公共网关。使用有效证书，并在 Bridge 的安全环境设置相同的 `BRIDGE_ANCHOR_BEARER`。HTTP 仅允许显式回环 IP，适合本机实验。应用层只支持追加；对能修改存证数据库文件或拥有存证私钥的管理员不承诺防篡改，请隔离运维权限并单独做受保护备份。
+
+独立凭证从 `GET /bridge/api/receipts/{id}?format=proof` 下载，有仓库权限且验证通过才返回。离线核验时为原有验签命令再加 `-anchor-proof receipt.proof.json -trusted-anchor-key <可信存证公钥Base64>`。不要只信 Markdown 状态或放在回执旁边的公钥。
 
 ## 运维约束
 

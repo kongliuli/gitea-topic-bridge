@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestArtifactCopiesBeforeHashAndDeniesHardLinks(t *testing.T) {
@@ -131,6 +132,32 @@ func verifyReceiptLab(t *testing.T, gitea, ownerToken string, browser *http.Clie
 		t.Fatal("tampered receipt verified")
 	}
 	url := fmt.Sprintf("%s/bridge/api/receipts/%s", bridgeURL, doc.ID)
+	anchorKey := os.Getenv("BRIDGE_TEST_TRUSTED_ANCHOR_KEY")
+	if anchorKey == "" {
+		t.Fatal("independent test key is unavailable")
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		response, err := browser.Get(url + "?format=proof")
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof, err := io.ReadAll(io.LimitReader(response.Body, 4096))
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode == 200 {
+			if response.Header.Get("X-Bridge-Anchor-Status") != "verified" || VerifyReceiptAnchor(first.raw, proof, key["public_key"], anchorKey) != nil {
+				t.Fatal("anchored receipt failed offline verification")
+			}
+			break
+		}
+		if response.StatusCode != 409 || time.Now().After(deadline) {
+			t.Fatalf("proof did not become available: %d", response.StatusCode)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	if export := loadLabPage(t, browser, url+"?format=json", nil, 200); export != string(first.raw) {
 		t.Fatal("correction overwrote old snapshot")
 	}
@@ -142,6 +169,7 @@ func verifyReceiptLab(t *testing.T, gitea, ownerToken string, browser *http.Clie
 	labAPI(t, gitea, ownerToken, "DELETE", collaborator, nil, nil, 204)
 	loadLabPage(t, browser, url+"?format=json", nil, 404)
 	loadLabPage(t, browser, url+"?format=markdown", nil, 404)
+	loadLabPage(t, browser, url+"?format=proof", nil, 404)
 	issue("first-receipt", "", 404)
 	labAPI(t, gitea, ownerToken, "PUT", collaborator, map[string]string{"permission": "write"}, nil, 204)
 }

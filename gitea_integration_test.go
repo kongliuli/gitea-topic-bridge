@@ -412,6 +412,7 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	t.Cleanup(func() { store.Close() })
 	app := httptest.NewUnstartedServer(nil)
 	bridgeURL := "http://" + app.Listener.Addr().String()
+	var anchorPublic string
 	var receipts *ReceiptConfig
 	if username == "labreviewer" {
 		artifactRoot := t.TempDir()
@@ -426,6 +427,20 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 		labAPI(t, giteaURL, ownerToken, "GET", "/users/labreviewer", nil, &owner, 200)
 		receipts = &ReceiptConfig{ArtifactRoot: artifactRoot, SnapshotRoot: t.TempDir(), Issuers: []int64{owner.ID},
 			SigningSeed: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{17}, 32))}
+		anchorBearer, err := randomID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ledger, err := OpenAnchorLedger(context.Background(), filepath.Join(t.TempDir(), "anchor.db"), base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{23}, 32)), anchorBearer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ledger.Close() })
+		anchorServer := httptest.NewServer(ledger.Handler())
+		t.Cleanup(anchorServer.Close)
+		anchorPublic = ledger.PublicKey()
+		receipts.Anchor = &ReceiptAnchorConfig{URL: anchorServer.URL + "/v1/anchors", PublicKey: anchorPublic, Bearer: anchorBearer}
+		t.Setenv("BRIDGE_TEST_TRUSTED_ANCHOR_KEY", anchorPublic)
 	}
 	var creds struct {
 		ID     string `json:"client_id"`
@@ -434,12 +449,13 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	labAPI(t, giteaURL, ownerToken, "POST", "/user/applications/oauth2", map[string]any{
 		"name": "Topic Bridge Lab", "confidential_client": true, "redirect_uris": []string{bridgeURL + "/bridge/auth/callback"},
 	}, &creds, 201)
-	handler, err := NewServer(ServerConfig{PublicBaseURL: bridgeURL + "/bridge/", GiteaPublicURL: giteaURL, GiteaAPIURL: giteaURL,
+	config := ServerConfig{PublicBaseURL: bridgeURL + "/bridge/", GiteaPublicURL: giteaURL, GiteaAPIURL: giteaURL,
 		ClientID: creds.ID, ClientSecret: creds.Secret, AllowLoopbackHTTP: true, PageSize: 1, MaxPages: 3,
 		TopicStore: store, EnablePullCreation: true, EnableMerge: true, EnableRevert: true,
 		Receipts: receipts,
 		Projects: []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
-	})
+	}
+	handler, err := NewServer(config)
 	if err != nil {
 		app.Listener.Close()
 		t.Fatal(err)
@@ -447,6 +463,16 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	app.Config.Handler = handler
 	app.Start()
 	t.Cleanup(app.Close)
+	if anchorPublic != "" {
+		worker, err := NewReceiptAnchorWorker(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { defer close(done); worker.Run(ctx) }()
+		t.Cleanup(func() { cancel(); <-done })
+	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		t.Fatal(err)

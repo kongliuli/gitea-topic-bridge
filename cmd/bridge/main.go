@@ -35,6 +35,9 @@ func loadConfig(path string) (bridge.ServerConfig, error) {
 	config.ClientSecret = os.Getenv("BRIDGE_OAUTH_CLIENT_SECRET")
 	if config.Receipts != nil {
 		config.Receipts.SigningSeed = os.Getenv("BRIDGE_RECEIPT_SIGNING_SEED")
+		if config.Receipts.Anchor != nil {
+			config.Receipts.Anchor.Bearer = os.Getenv("BRIDGE_ANCHOR_BEARER")
+		}
 	}
 	return config, nil
 }
@@ -45,12 +48,25 @@ func main() {
 	hookListen := flag.String("hook-listen", "", "optional dedicated loopback listen address for Gitea webhooks")
 	verify := flag.String("verify-receipt", "", "verify a receipt JSON file and exit")
 	trustedKey := flag.String("trusted-receipt-key", "", "trusted Ed25519 public key (base64) for receipt verification")
+	proof := flag.String("anchor-proof", "", "optional detached independent proof JSON file")
+	trustedAnchorKey := flag.String("trusted-anchor-key", "", "trusted independent Ed25519 public key (base64)")
+	anchorDB := flag.String("anchor-db", "", "run the independent anchor service using this absolute database path")
 	flag.Parse()
 	if *verify != "" {
-		if err := verifyReceiptFile(*verify, *trustedKey); err != nil {
+		if err := verifyReceiptFile(*verify, *trustedKey, *proof, *trustedAnchorKey); err != nil {
 			log.Fatal(err)
 		}
-		log.Print("receipt signature verified")
+		if *proof != "" {
+			log.Print("receipt signature and independent anchor verified")
+		} else {
+			log.Print("receipt signature verified")
+		}
+		return
+	}
+	if *anchorDB != "" {
+		if err := serveAnchor(*anchorDB, *listen); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 	host, _, err := net.SplitHostPort(*listen)
@@ -89,6 +105,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	serveErr := make(chan error, 2)
+	if config.Receipts != nil && config.Receipts.Anchor != nil {
+		worker, err := bridge.NewReceiptAnchorWorker(config)
+		if err != nil {
+			log.Fatal(err)
+		}
+		done := make(chan struct{})
+		go func() { defer close(done); worker.Run(ctx) }()
+		defer func() { stop(); <-done }()
+	}
 	if *hookListen != "" {
 		hook, err := bridge.NewWebhook(config, os.Getenv("BRIDGE_WEBHOOK_SECRET"), os.Getenv("BRIDGE_WEBHOOK_READER_TOKEN"))
 		if err != nil {

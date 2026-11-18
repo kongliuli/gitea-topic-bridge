@@ -21,10 +21,11 @@ import (
 const receiptArtifactLimit = 256 << 20
 
 type ReceiptConfig struct {
-	ArtifactRoot string  `json:"artifact_root"`
-	SnapshotRoot string  `json:"snapshot_root"`
-	Issuers      []int64 `json:"issuers"`
-	SigningSeed  string  `json:"-"`
+	ArtifactRoot string               `json:"artifact_root"`
+	SnapshotRoot string               `json:"snapshot_root"`
+	Issuers      []int64              `json:"issuers"`
+	SigningSeed  string               `json:"-"`
+	Anchor       *ReceiptAnchorConfig `json:"anchor,omitempty"`
 }
 
 type receiptService struct {
@@ -32,6 +33,7 @@ type receiptService struct {
 	private                    ed25519.PrivateKey
 	public                     ed25519.PublicKey
 	issuers                    map[int64]bool
+	anchor                     *anchorClient
 }
 
 func newReceiptService(config ReceiptConfig) (*receiptService, error) {
@@ -69,6 +71,12 @@ func newReceiptService(config ReceiptConfig) (*receiptService, error) {
 	}
 	private := ed25519.NewKeyFromSeed(seed)
 	service := &receiptService{artifactRoot: config.ArtifactRoot, snapshotRoot: output, private: private, public: private.Public().(ed25519.PublicKey), issuers: make(map[int64]bool)}
+	if config.Anchor != nil {
+		service.anchor, err = newAnchorClient(*config.Anchor, service.public)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, id := range config.Issuers {
 		if id <= 0 {
 			return nil, errors.New("receipt issuer IDs must be positive")
@@ -245,6 +253,9 @@ func (server *Server) createReceipt(writer http.ResponseWriter, request *http.Re
 	doc := receiptDocument{Schema: 1, ID: id, PreviousID: input.PreviousID, PreviousDigest: previousDigest, Version: version, TopicID: topic.ID, Topic: topic.Topic,
 		TopicVersion: topic.Version, ProjectID: topic.ProjectID, IssuerID: user.ID, Artifacts: make([]artifactSnapshot, 0),
 		Scope: receiptScope{ArtifactProvenance: "unverified", TestResults: "unverified", IndependentAnchor: "not_configured"}}
+	if server.receipts.anchor != nil {
+		doc.Scope.IndependentAnchor = "separate_proof_required"
+	}
 	for index, repo := range repos {
 		member, err := client.receiptSource(ctx, repo, topic.Members[index], selections[repo.ID])
 		if err != nil {
@@ -304,7 +315,7 @@ func (server *Server) snapshotAndSaveReceipt(ctx context.Context, client *Gitea,
 		return nil, errors.New("receipt exceeds 16 MiB")
 	}
 	removeStaging = false
-	err = server.config.TopicStore.insertReceipt(ctx, doc, key, hash, raw)
+	err = server.config.TopicStore.insertReceipt(ctx, doc, key, hash, raw, server.receipts.anchor != nil)
 	if errors.Is(err, errIdempotencyConflict) || errors.Is(err, errReceiptSuperseded) {
 		removeStaging = true
 	}
@@ -341,11 +352,26 @@ func (server *Server) getReceipt(writer http.ResponseWriter, request *http.Reque
 		server.receiptProblem(writer, request, err)
 		return
 	}
-	switch request.URL.Query().Get("format") {
+	format := request.URL.Query().Get("format")
+	status, proof, err := server.receiptAnchorStatus(request.Context(), doc.ID, envelope)
+	if err != nil {
+		server.receiptProblem(writer, request, err)
+		return
+	}
+	writer.Header().Set("X-Bridge-Anchor-Status", status)
+	switch format {
+	case "proof":
+		if proof == nil {
+			responseProblem(writer, 409, "anchor_proof_unavailable")
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+		writer.Header().Set("Content-Disposition", `attachment; filename="receipt-`+id+`.proof.json"`)
+		writer.Write(proof)
 	case "markdown":
 		writer.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		writer.Header().Set("Content-Disposition", `attachment; filename="receipt-`+id+`.md"`)
-		writer.Write(receiptMarkdown(doc, envelope))
+		writer.Write(receiptMarkdown(doc, envelope, status))
 	case "json", "":
 		if request.URL.Query().Get("format") == "json" {
 			writer.Header().Set("Content-Disposition", `attachment; filename="receipt-`+id+`.json"`)
@@ -356,7 +382,26 @@ func (server *Server) getReceipt(writer http.ResponseWriter, request *http.Reque
 	}
 }
 
-func receiptMarkdown(doc receiptDocument, envelope receiptEnvelope) []byte {
+func (server *Server) receiptAnchorStatus(ctx context.Context, id string, envelope receiptEnvelope) (string, []byte, error) {
+	var proof sql.NullString
+	err := server.config.TopicStore.db.QueryRowContext(ctx, `SELECT proof FROM receipt_anchor_outbox WHERE receipt_id=?`, id).Scan(&proof)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "not_configured", nil, nil
+	case err != nil:
+		return "", nil, err
+	case server.receipts.anchor == nil:
+		return "check_unavailable", nil, nil
+	case !proof.Valid:
+		return "pending", nil, nil
+	case verifyAnchorProof([]byte(proof.String), anchorStatement{id, envelope.Digest, envelope.KeyID}, server.receipts.anchor.public) != nil:
+		return "proof_invalid", nil, nil
+	default:
+		return "verified", []byte(proof.String), nil
+	}
+}
+
+func receiptMarkdown(doc receiptDocument, envelope receiptEnvelope, anchorStatus string) []byte {
 	var output strings.Builder
 	fmt.Fprintf(&output, "# 交付回执 %s · v%d\n\n- 回执：%s\n- 联调单：%s · v%d\n- 签发账号：%d\n- 签发时间：%s\n- JSON 快照 SHA-256：%s\n- 签名密钥：%s\n- Ed25519 签名：%s\n",
 		doc.Topic, doc.Version, doc.ID, doc.TopicID, doc.TopicVersion, doc.IssuerID, doc.IssuedAt.Format(time.RFC3339), envelope.Digest, envelope.KeyID, envelope.Signature)
@@ -392,6 +437,7 @@ func receiptMarkdown(doc receiptDocument, envelope receiptEnvelope) []byte {
 	for _, artifact := range doc.Artifacts {
 		fmt.Fprintf(&output, "- 仓库 %d · %s · %d 字节 · SHA-256 %s\n", artifact.RepositoryID, strconv.QuoteToASCII(artifact.Path), artifact.Size, artifact.SHA256)
 	}
-	output.WriteString("\n签名对应 JSON 快照。制品哈希证明复制的字节，不证明制品由所列提交构建；未验证测试范围。尚未独立存证。\n")
+	fmt.Fprintf(&output, "\n独立存证状态：%s。独立签名凭证需单独下载和验证。\n", anchorStatus)
+	output.WriteString("\n签名对应 JSON 快照。制品哈希证明复制的字节，不证明制品由所列提交构建；未验证测试范围。\n")
 	return []byte(output.String())
 }
