@@ -239,6 +239,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	api("POST", "/repos/labowner/no-match/contents/direct.txt", map[string]string{
 		"branch": "main", "message": "Synthetic protected write", "content": "dGVzdAo=",
 	}, nil, 403)
+	verifyProtectedGitPush(t, base, "labreviewer", reviewerPassword)
 	type labMergeTarget struct {
 		Number    int64
 		Head      struct{ SHA string }
