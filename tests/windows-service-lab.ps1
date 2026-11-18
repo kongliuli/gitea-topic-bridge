@@ -18,7 +18,10 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
 
 public static class LabServiceLogon
 {
@@ -35,6 +38,8 @@ public static class LabServiceLogon
     [DllImport("advapi32.dll")] private static extern uint LsaAddAccountRights(IntPtr policy, byte[] sid, LsaString[] rights, uint count);
     [DllImport("advapi32.dll")] private static extern uint LsaClose(IntPtr policy);
     [DllImport("advapi32.dll")] private static extern uint LsaNtStatusToWinError(uint status);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LogonUser(string user, string domain, string password, int logonType, int provider, out SafeAccessTokenHandle token);
 
     private static void Check(uint status)
     {
@@ -58,6 +63,23 @@ public static class LabServiceLogon
         } finally {
             Marshal.FreeHGlobal(text);
             LsaClose(policy);
+        }
+    }
+
+    public static bool CanOpen(string user, string domain, string password, string path, FileAccess mode)
+    {
+        // LOGON32_LOGON_SERVICE with the default provider exercises the service account token.
+        if (!LogonUser(user, domain, password, 5, 0, out SafeAccessTokenHandle token))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        using (token) {
+            return WindowsIdentity.RunImpersonated(token, () => {
+                try {
+                    using (File.Open(path, FileMode.Open, mode, FileShare.ReadWrite)) {}
+                    return true;
+                } catch (UnauthorizedAccessException) {
+                    return false;
+                }
+            });
         }
     }
 }
@@ -183,26 +205,9 @@ function New-GiteaLabUser([string]$Binary, [string[]]$Flags, [string]$Name, [str
 }
 
 function Assert-LabAccess([pscredential]$Credential, [string]$Path, [bool]$Allowed, [System.IO.FileAccess]$Mode = 'Read') {
-    $encodedPath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Path))
-    $command = @'
-try {
-    $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('FIXTURE_PATH'))
-    $file = [IO.File]::Open($path, 'Open', 'FIXTURE_ACCESS', 'ReadWrite')
-    $file.Dispose()
-    exit 0
-} catch [UnauthorizedAccessException] { exit 13 }
-catch { exit 1 }
-'@
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command.Replace('FIXTURE_PATH', $encodedPath).Replace('FIXTURE_ACCESS', [string]$Mode)))
-    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $parameters = @{
-        FilePath = $powershell; Credential = $Credential; WorkingDirectory = $env:SystemRoot
-        WindowStyle = 'Hidden'; Wait = $true; PassThru = $true
-        ArgumentList = @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded)
-    }
-    $probe = Start-Process @parameters
-    $expected = if ($Allowed) { 0 } else { 13 }
-    if ($probe.ExitCode -ne $expected) { throw "Unexpected file access result from $($Credential.UserName): $($probe.ExitCode)." }
+    $networkCredential = $Credential.GetNetworkCredential()
+    $result = [LabServiceLogon]::CanOpen($networkCredential.UserName, $networkCredential.Domain, $networkCredential.Password, $Path, $Mode)
+    if ($result -ne $Allowed) { throw "Unexpected $Mode access to $Path for $($Credential.UserName): $result." }
 }
 
 try {
