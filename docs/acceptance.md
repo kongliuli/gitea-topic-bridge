@@ -134,3 +134,12 @@ $env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
 $env:BRIDGE_TEST_GITEA_RESTORE_ASSETS = '1' # 同时验证 LFS 和附件，需安装 git-lfs
 go test -v -timeout 3m -run '^TestGiteaColdRestoreLab$' -count=1 ./...
 ```
+
+## 已验证：合成旧仓试点导入
+
+从合成的旧裸仓克隆到临时目录，再将两个分支和一个带注解的标签推到新的空私有 Gitea 仓。逐项核对对象 ID，确认旧裸仓引用保持原样且通过 `git fsck`。配置新仓主干保护后创建一条试点 PR，普通只读账号通过 Bridge 读到与 Gitea 一致的 PR 编号和 head SHA。测试日志记录新仓 ID 和试点 PR；真实试点和按批切换待现场执行。
+
+```powershell
+$env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
+go test -v -timeout 3m -run '^TestGiteaPilotMigrationLab$' -count=1 ./...
+```

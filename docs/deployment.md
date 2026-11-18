@@ -110,4 +110,10 @@ Start-Service -Name GiteaTopicBridge
 
 在存证权限边界复制及恢复账本时不传 `-Snapshots`。从独立渠道核对公钥后填入对应变量。没有独立存证的实例省略存证相关参数；若数据库带有存证凭证，不能跳过该凭证验签。离线命令只读检查 SQLite、签名版本链、快照字节和可选账本，不启动服务，也不会迁移旧版库。对旧版备份先保留原件，使用对应版本或迁移另一份副本。通过后再用独立端口和恢复目录启动，重新登录测试，检查仓库 ID 和权限未变、收件及回执可用；最后才安排正式切换，保留原仓和切换记录。
 
+### 非关键项目试接
+
+1. 选一个非关键仓，记录源仓位置、默认分支、分支和标签的对象 ID。为导入创建独立临时克隆，从空的私有 Gitea 仓开始。对纯 Git 历史可用 `git clone --mirror <旧仓地址> <临时目录>`，在临时目录用 `git push --atomic <新仓地址> 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'` 复制分支和标签。旧仓和旧目录保留原位。若有 LFS、PR、发布、Wiki 或其他平台数据，按实际源和目标选择 Gitea 迁移方式，并逐项核验。
+2. 用 `git ls-remote --refs <新仓地址>` 对比分支和标签对象，检查默认分支，设置主干保护和成员权限。将新仓的数字 ID 加入 Bridge 试点项目组。由普通开发者创建测试分支和带 Topic 的 PR，用独立只读账号核对 Bridge 中的仓名、PR 号、head SHA 和检查状态。
+3. 记录切换时间、执行人、源与目标 URL、分支和标签比对结果、Gitea 仓 ID、试点 PR、验收结果与回退负责人。试点通过后才逐批导入。切换窗口冻结旧仓写入并再核一遍对象；已写入新仓的提交先保全，回退入口后再处理待同步改动。
+
 参考：[Gitea 配置](https://docs.gitea.com/administration/config-cheat-sheet)、[模板](https://docs.gitea.com/administration/customizing-gitea/)、[Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve)。
