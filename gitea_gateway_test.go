@@ -152,7 +152,7 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 		t.Fatal("Gitea menu did not resolve to the Bridge receipt center")
 	}
 	topic := postLabTopic(t, browser, public+"/bridge/api/topics", public, "tls-topic", `{"project_id":"lab","topic":"CAD-HTTPS"}`, 201)
-	path := issueTLSLabReceipt(t, browser, public, topic.ID, fixture.ID, key, fmt.Sprintf("%x", sha256.Sum256(artifact)))
+	path := issueSingleArtifactLabReceipt(t, browser, public, topic.ID, fixture.ID, key, fmt.Sprintf("%x", sha256.Sum256(artifact)))
 	receiptID := strings.TrimPrefix(path, "/bridge/api/receipts/")
 	returnPath, returnQuery = "/bridge/receipts/", "id="+receiptID+"&topic_id="+topic.ID
 	secureSession = false
@@ -174,7 +174,7 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 	}
 }
 
-func issueTLSLabReceipt(t *testing.T, browser *http.Client, public, topic string, repository int64, key ed25519.PublicKey, digest string) string {
+func issueSingleArtifactLabReceipt(t *testing.T, browser *http.Client, public, topic string, repository int64, key ed25519.PublicKey, digest string) string {
 	t.Helper()
 	body := fmt.Sprintf(`{"topic_id":%q,"artifacts":[{"repository_id":%d,"path":"artifact.txt"}]}`, topic, repository)
 	request, err := http.NewRequest(http.MethodPost, public+"/bridge/api/receipts", strings.NewReader(body))
@@ -183,7 +183,7 @@ func issueTLSLabReceipt(t *testing.T, browser *http.Client, public, topic string
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Origin", public)
-	request.Header.Set("Idempotency-Key", "tls-receipt")
+	request.Header.Set("Idempotency-Key", "lab-receipt")
 	response, err := browser.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -191,11 +191,11 @@ func issueTLSLabReceipt(t *testing.T, browser *http.Client, public, topic string
 	defer response.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil || response.StatusCode != http.StatusCreated {
-		t.Fatalf("HTTPS receipt issue failed: %d %s", response.StatusCode, raw)
+		t.Fatalf("lab receipt issue failed: %d %s", response.StatusCode, raw)
 	}
 	_, snapshot, err := readVerifiedReceipt(raw, key)
 	if err != nil || snapshot.TopicID != topic || len(snapshot.Artifacts) != 1 || snapshot.Artifacts[0].SHA256 != digest {
-		t.Fatalf("HTTPS signed receipt did not bind the fixture bytes: %v", err)
+		t.Fatalf("signed lab receipt did not bind the fixture bytes: %v", err)
 	}
 	return "/bridge/api/receipts/" + snapshot.ID
 }

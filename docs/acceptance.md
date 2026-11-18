@@ -136,6 +136,17 @@ Windows 构建和测试验证 SCM 处理器的启动、询问、停止、关机�
 
 Windows 集成测试从真实 Gitea 签发两版回执后，干净关闭 Bridge 和存证账本，再用部署脚本分别复制到备份目录、从备份恢复到新的空目录。离线核验两版签名、版本链、两份制品 SHA-256 和两份独立凭证；恢复库返回与原导出相同的回执字节和凭证。验证核验命令不修改数据库、同长度制品损坏会被发现，目标非空或 SQLite 有残留日志时拒绝复制。
 
+## 已验证：真实进程中断后恢复待存证回执
+
+用同一 Windows 二进制分别启动 Bridge 和独立存证模式，两者使用不同的临时密钥文件和数据库。存证进程未启动时，普通 Gitea 协作者成功签发，凭证下载返回 `409`，Bridge 日志记录待重试。强制结束测试 Bridge 进程后，启动存证，再用原库启动 Bridge。客户端重新登录，找到同一回执，下载并离线验签。原签名 JSON 字节保持一致。再次重启存证进程后，重放原请求，返回的凭证字节也与首次一致。本项使用前台回环进程；SCM 自动恢复和 Windows 账户隔离仍须现场验证。
+
+```powershell
+go build -o "$env:TEMP\bridge-recovery-lab.exe" ./cmd/bridge
+$env:BRIDGE_TEST_BRIDGE_BINARY = Join-Path $env:TEMP 'bridge-recovery-lab.exe'
+$env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
+go test -v -timeout 3m -run '^TestBridgeProcessAnchorRecoveryLab$' -count=1 ./...
+```
+
 ## 已验证：Gitea 裸仓与 SQLite 空目录恢复
 
 用 Gitea v28.4.0 的 `manager shutdown` 正常停止隔离实例并等待进程退出，确认 SQLite 日志已经关闭。将裸仓、应用数据、自定义目录及配置复制到备份目录，再恢复到另一个空目录。调整目录和回环端口并重建 Git hooks 后，原普通协作者可使用原权限克隆私有仓。仓库数字 ID、默认分支 SHA、保护规则及克隆文件内容与原实例一致。恢复后推送获准的新分支，Gitea API 可读取到新分支和正确 SHA。
