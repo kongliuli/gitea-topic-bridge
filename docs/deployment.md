@@ -59,6 +59,8 @@ tailscale serve status
 
 在测试机上为 Bridge、Gitea、Caddy 和可选存证服务分别准备低权限账号。Bridge 账号只读程序目录和配置，读取制品，且只对自己的数据库、快照及日志目录有写权限；不得接触 Gitea 裸仓和独立存证目录。Gitea 和 Caddy 分别按 [Gitea 服务文档](https://docs.gitea.com/installation/windows-service/) 与 [Caddy 服务文档](https://caddyserver.com/docs/running#windows-service) 注册，设置自己的账号与目录，不照搬默认 LocalSystem。
 
+Gitea 的服务命令带绝对 `--work-path`、`--config`，SQLite、裸仓和日志使用该账号可写的绝对路径。用服务账号检查 Git；如系统 PATH 与管理员终端不同，在 Gitea `[git]` 的 `PATH` 填入 `git.exe` 的绝对路径。Caddy 的服务命令用 `run --config <绝对路径> --adapter caddyfile`，并为证书存储指定该账号可写的目录。复验顺序是先 Gitea，再 Bridge 和网关，最后从客户端验证 Git HTTPS 与 OAuth。
+
 为 Bridge 新建只允许管理员和服务账号读取的 JSON 密钥文件，保存 `oauth_client_secret`；按需加 `webhook_secret`、`webhook_reader_token`、`receipt_signing_seed`、`anchor_bearer`。独立存证服务用不同文件，只放 `anchor_signing_seed` 和 `anchor_bearer`。启用 `-secrets` 后只读该文件，不再混用启动环境中的密钥。密钥值不要写入命令行、服务注册表或 Git。
 
 用管理员 PowerShell 注册（前提是目标账号拥有「作为服务登录」权限，目录及 ACL 已就绪）：

@@ -140,7 +140,9 @@ Windows 构建和测试验证 SCM 处理器的启动、询问、停止、关机�
 
 在一次性 Windows Server 2025 VM，用实际部署脚本为 Bridge 和独立存证分配两个专用本地账号并注册服务。SCM 记录的服务身份、延迟自动启动和三段恢复延迟符合配置。两个服务在回环实际监听并响应请求。每个服务账号能读取自己的密钥文件，读取对方的密钥文件会收到拒绝。强制结束测试 Bridge 后，SCM 拉起不同 PID 的服务并恢复 HTTP；随后用 SCM 正常停止两个服务。[通过的 GitHub Actions 记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44381792177)
 
-可在 GitHub Actions 手动运行「Windows service lab」复验。该实验覆盖 Bridge 与存证进程，目标主机的整机重启、Gitea 与 Caddy 服务、业务路径 ACL 和远程网络仍须现场验收。
+随后在同类 VM 加入 Gitea v28.4.0 和 Caddy v2.11.9，下载后校验 SHA-256。四个服务分别以专用账号启动并绑定回环。普通 Gitea 协作者从真实 Caddy HTTPS 入口完成 OAuth，保存联调单，核对私有仓的 Git HTTPS 引用和 Bridge 项目总览指向同一提交。匿名账号看不到私有仓，外部网关拒绝内部 Webhook，四个服务都接受 SCM 停止。[完整链路运行记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44383280169)
+
+可在 GitHub Actions 手动运行「Windows service lab」复验。目标主机的整机重启、实际账户和业务路径 ACL、远程网络与项目试接仍须现场验收。
 
 ## 已验证：Bridge 与独立账本空目录恢复
 
