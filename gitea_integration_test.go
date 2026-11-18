@@ -57,7 +57,7 @@ func TestGiteaLocalLab(t *testing.T) {
 		}
 		return string(match[1]), string(password[1])
 	}
-	ownerToken, _ := createUser("labowner", "all", "--admin")
+	ownerToken, ownerPassword := createUser("labowner", "all", "--admin")
 	readerToken, readerPassword := createUser("labreader", "read:repository,read:user")
 	reviewerToken, reviewerPassword := createUser("labreviewer", "write:repository,read:user")
 	forkToken, forkPassword := createUser("labfork", "write:repository,read:user")
@@ -161,6 +161,25 @@ func TestGiteaLocalLab(t *testing.T) {
 	api("PUT", "/repos/labowner/conflict/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
 	labAPI(t, base, reviewerToken, "POST", fmt.Sprintf("/repos/labowner/conflict/pulls/%d/reviews", approved), map[string]string{"event": "APPROVED", "body": "Synthetic verified review"}, nil, 200)
 	browser, bridgeURL := loginLab(t, base, ownerToken, "labreader", readerPassword, repos, nil)
+	projectURL := bridgeURL + "/bridge/api/projects?overview=lab"
+	if concealed, missing := loadLabPage(t, browser, bridgeURL+"/bridge/api/projects?overview=secret", nil, 404),
+		loadLabPage(t, browser, bridgeURL+"/bridge/api/projects?overview=absent", nil, 404); concealed != missing {
+		t.Fatal("overview distinguished a hidden project from an absent project")
+	}
+	readOverview := func(browser *http.Client, address string) []projectRepositoryOverview {
+		t.Helper()
+		var overview struct{ Repositories []projectRepositoryOverview }
+		if err := json.Unmarshal([]byte(loadLabPage(t, browser, address, nil, 200)), &overview); err != nil {
+			t.Fatal(err)
+		}
+		return overview.Repositories
+	}
+	overview := readOverview(browser, projectURL)
+	if len(overview) != 3 || overview[0].Branch != "main" || overview[0].Commit == nil ||
+		overview[0].Commit.ID != actualMerge.SHA || overview[0].Commit.URL != base+"/labowner/merged/commit/"+actualMerge.SHA ||
+		overview[0].Protection.Status != "needs_attention" {
+		t.Fatalf("reader overview should show three visible repositories, merge SHA, and an unprotected branch: %+v", overview)
+	}
 	lookupURL := bridgeURL + "/bridge/api/topics/lookup?project_id=lab&topic=CAD-01"
 	data := loadLabPage(t, browser, lookupURL, nil, 200)
 	if !strings.Contains(data, `"name":"conflict"`) || !strings.Contains(data, `"lifecycle":"merged"`) || strings.Contains(data, `"name":"hidden"`) {
@@ -241,6 +260,20 @@ func TestGiteaLocalLab(t *testing.T) {
 		"branch": "main", "message": "Synthetic protected write", "content": "dGVzdAo=",
 	}, nil, 403)
 	verifyProtectedGitPush(t, base, "labreviewer", reviewerPassword)
+	overview = readOverview(browser, projectURL)
+	if len(overview) != 3 || overview[0].Protection.Status != "partial" || overview[0].Protection.RequiredApprovals == nil ||
+		*overview[0].Protection.RequiredApprovals != 1 || overview[0].Protection.UserCanPush == nil || *overview[0].Protection.UserCanPush {
+		t.Fatalf("ordinary reader should see the protection and approval count with rule details restricted: %+v", overview)
+	}
+	api("POST", "/repos/labowner/hidden/branch_protections", map[string]any{
+		"rule_name": "main", "enable_push": true, "required_approvals": 1,
+	}, nil, 201)
+	adminBrowser, adminURL := loginLab(t, base, ownerToken, "labowner", ownerPassword, repos, nil)
+	overview = readOverview(adminBrowser, adminURL+"/bridge/api/projects?overview=lab")
+	if len(overview) != 4 || overview[0].Protection.Status != "meets_baseline" || overview[3].Protection.Status != "needs_attention" ||
+		strings.Join(overview[3].Protection.Findings, ",") != "push_enabled,reviewers_not_designated,approval_bypass_enabled" {
+		t.Fatalf("repository administrator should see the baseline check and the weak rule findings: %+v", overview)
+	}
 	type labMergeTarget struct {
 		Number    int64
 		Head      struct{ SHA string }
@@ -360,6 +393,10 @@ func TestGiteaLocalLab(t *testing.T) {
 	labAPI(t, base, reviewerToken, "POST", inverseMergePath, map[string]string{"do": "merge", "head_commit_id": revert.InverseSHA}, nil, 200)
 	api("GET", "/repos/labowner/no-match/contents/bridge-source.txt?ref=main", nil, nil, 404)
 	api("DELETE", "/repos/labowner/conflict/collaborators/labreader", nil, nil, 204)
+	overview = readOverview(browser, projectURL)
+	if len(overview) != 2 || overview[0].Repository.ID != repos[0].ID || overview[1].Repository.ID != repos[2].ID {
+		t.Fatalf("revoked repository still appears in the overview: %+v", overview)
+	}
 	results = lookup(3)
 	if len(results) != 2 || results[1].Repository.Name != "no-match" {
 		t.Fatalf("lookup after revocation: %#v", results)
@@ -535,7 +572,8 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	if dashboard := loadLabPage(t, browser, giteaURL+"/login/oauth/grant", values, 200); !strings.Contains(dashboard, "/bridge/app.js") {
 		t.Fatal("OAuth consent did not return to the Bridge page")
 	}
-	if projects := loadLabPage(t, browser, bridgeURL+"/bridge/api/projects", nil, 200); !strings.Contains(projects, fmt.Sprintf(`"user":%q`, username)) || strings.Contains(projects, "Secret") {
+	if projects := loadLabPage(t, browser, bridgeURL+"/bridge/api/projects", nil, 200); !strings.Contains(projects, fmt.Sprintf(`"user":%q`, username)) ||
+		strings.Contains(projects, `"id":"secret"`) != (username == "labowner") {
 		t.Fatal("OAuth session used the wrong user or exposed a hidden project")
 	}
 	return browser, bridgeURL

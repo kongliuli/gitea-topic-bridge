@@ -113,6 +113,8 @@ func (server *Server) startLogin(writer http.ResponseWriter, request *http.Reque
 		}
 	} else if topicIDPattern.MatchString(query.Get("topic_id")) {
 		returnQuery.Set("topic_id", query.Get("topic_id"))
+	} else if projectID.MatchString(query.Get("overview")) {
+		returnQuery.Set("overview", query.Get("overview"))
 	} else if projectID.MatchString(query.Get("project_id")) && topicPattern.MatchString(query.Get("topic")) {
 		returnQuery.Set("project_id", query.Get("project_id"))
 		returnQuery.Set("topic", query.Get("topic"))

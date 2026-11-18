@@ -25,6 +25,12 @@
       <label>需求编号 <input name="topic" placeholder="CAD-TOL-01" pattern="[A-Z0-9][A-Z0-9\-]{0,63}" maxlength="64" required></label>
       <button type="submit">查询</button>
     </form>
+    <details id="overview" hidden>
+      <summary>项目总览</summary>
+      <button id="refresh-overview" type="button">刷新总览</button>
+      <p id="overview-status" role="status"></p>
+      <div id="overview-repos"></div>
+    </details>
     <p id="message" role="status">正在读取登录状态…</p>
     <button id="save-topic" type="button" hidden>保存可见仓库为联调单</button>
     <p id="saved-topic" role="status" hidden></p>

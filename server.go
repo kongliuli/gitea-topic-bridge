@@ -207,6 +207,10 @@ func (server *Server) upstreamProblem(writer http.ResponseWriter, request *http.
 }
 
 func (server *Server) listProjects(writer http.ResponseWriter, request *http.Request, client *Gitea, user GiteaUser) {
+	if request.URL.Query().Has("overview") {
+		server.projectOverview(writer, request, client, request.URL.Query().Get("overview"))
+		return
+	}
 	type projectSummary struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -217,12 +221,12 @@ func (server *Server) listProjects(writer http.ResponseWriter, request *http.Req
 		for _, repo := range project.Repositories {
 			visible, checked := visibility[repo]
 			if !checked {
-				var err error
-				visible, err = client.CanReadPullRequests(request.Context(), repo)
-				if err != nil {
+				_, err := client.projectRepository(request.Context(), repo)
+				if err != nil && !errors.Is(err, ErrNotVisible) {
 					server.upstreamProblem(writer, request, err)
 					return
 				}
+				visible = err == nil
 				visibility[repo] = visible
 			}
 			if visible {

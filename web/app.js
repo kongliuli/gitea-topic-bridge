@@ -11,11 +11,16 @@ const receiptCenter = document.querySelector('#receipt-center');
 const submit = form.querySelector('button');
 const project = form.elements.namedItem('project_id');
 const topic = form.elements.namedItem('topic');
+const overview = document.querySelector('#overview');
+const overviewStatus = document.querySelector('#overview-status');
+const overviewRepos = document.querySelector('#overview-repos');
+const refreshOverview = document.querySelector('#refresh-overview');
 const statuses = { complete: '已查完', incomplete: '未查完', failed: '查询失败' };
 const lifecycles = { merged: '已合并', open: '开放', closed: '关闭未合并' };
 const checks = { success: '已报告的检查通过', pending: '等待中', warning: '警告', failure: '失败', error: '出错', skipped: '跳过', not_reported: '未报告' };
 const conflicts = { none_reported: '未报告冲突', not_mergeable_reason_unknown: 'Gitea 暂不可合并，原因未知', not_applicable: '不适用' };
 let activeQuery;
+let overviewQuery;
 let storeEnabled = false;
 let writesEnabled = false;
 let mergeEnabled = false;
@@ -32,6 +37,11 @@ function element(tag, text) {
 
 function requireLogin() {
   activeQuery?.abort();
+  overviewQuery?.abort();
+  overview.open = false;
+  overview.hidden = true;
+  overviewRepos.replaceChildren();
+  overviewStatus.textContent = '';
   login.href = `/bridge/auth/login${location.search}`;
   login.hidden = false;
   logout.hidden = true;
@@ -42,6 +52,65 @@ function requireLogin() {
   results.replaceChildren();
   message.textContent = '先登录 Gitea，再查看你有权限的仓库。';
 }
+
+async function loadOverview() {
+  overviewQuery?.abort();
+  if (!overview.open || overview.hidden) return;
+  const query = new AbortController();
+  overviewQuery = query;
+  overviewRepos.replaceChildren();
+  overviewStatus.textContent = '正在读取项目总览…';
+  try {
+    const response = await fetch(`/bridge/api/projects?overview=${encodeURIComponent(project.value)}`, { signal: query.signal });
+    if (query.signal.aborted) return;
+    if (response.status === 401) return requireLogin();
+    if (response.status === 404) {
+      overviewStatus.textContent = '你当前无法查看该项目。';
+      return;
+    }
+    if (!response.ok) throw new Error('overview failed');
+    const data = await response.json();
+    if (query.signal.aborted) return;
+    overviewStatus.textContent = `${data.name} · 读取于 ${new Date(data.read_at).toLocaleString()}`;
+    for (const row of data.repositories) {
+      const article = element('article', '');
+      const name = element('a', `${row.repository.owner}/${row.repository.name}`);
+      name.href = row.url;
+      const title = element('h2', '');
+      title.append(name);
+      const commit = element('p', `${row.default_branch ?? '默认分支未知'} · 最新提交 `);
+      if (row.latest_commit) {
+        const link = element('a', row.latest_commit.id.slice(0, 12));
+        link.href = row.latest_commit.url;
+        commit.append(link);
+      } else {
+        commit.append('未知');
+      }
+      const protection = row.protection;
+      const labels = {
+        meets_baseline: '已核实符合主干规则', needs_attention: '需要检查', partial: '规则仅部分可见',
+        not_applicable: '镜像或归档仓', unknown: '未知',
+      };
+      const findings = {
+        unprotected: '未设置保护', no_required_approval: '未要求批准', push_enabled: '允许直接推送或强推',
+        reviewers_not_designated: '未指定评审范围', approval_bypass_enabled: '存在审批绕过配置',
+      };
+      article.append(title, commit, element('p', `分支保护：${labels[protection.status] ?? '未知'}`));
+      if (protection.required_approvals != null) {
+        const push = protection.user_can_push == null ? '未知' : protection.user_can_push ? '允许' : '禁止';
+        article.append(element('p', `需要 ${protection.required_approvals} 人批准 · Gitea 报告当前账号推送：${push}`));
+      }
+      for (const finding of protection.findings ?? []) article.append(element('p', findings[finding] ?? '规则需要检查'));
+      overviewRepos.append(article);
+    }
+  } catch {
+    if (!query.signal.aborted) overviewStatus.textContent = '无法读取项目总览，请稍后刷新。';
+  }
+}
+
+overview.addEventListener('toggle', loadOverview);
+project.addEventListener('change', loadOverview);
+refreshOverview.addEventListener('click', loadOverview);
 
 function showResults(data, decorate) {
   results.replaceChildren();
@@ -461,10 +530,12 @@ async function loadProjects() {
       await openSavedTopic(saved);
       if (activeQuery?.signal.aborted) return;
     }
-    const selected = params.get('project_id');
+    const selected = params.get('project_id') ?? params.get('overview');
     if (data.projects.some((item) => item.id === selected)) project.value = selected;
     if (!saved) topic.value = params.get('topic') ?? '';
     form.hidden = false;
+    overview.hidden = false;
+    if (params.get('overview') === project.value) overview.open = true;
     if (!saved) message.textContent = '选择项目组并输入需求编号。';
     if (selected === project.value && topic.value && form.checkValidity()) lookup();
   } catch {
