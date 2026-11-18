@@ -8,6 +8,8 @@ on:
       - .github/workflows/windows-service-lab.yml
       - examples/Register-BridgeService.ps1
       - tests/windows-service-lab.ps1
+      - examples/Caddyfile
+      - examples/gitea/extra_links.tmpl
       - '**.go'
 
 permissions:
@@ -28,6 +30,22 @@ jobs:
       - name: Build Windows binary
         shell: pwsh
         run: go build -trimpath -o "$env:RUNNER_TEMP\bridge-scm-lab.exe" ./cmd/bridge
+      - name: Download verified Gitea and Caddy releases
+        shell: pwsh
+        run: |
+          $gitea = Join-Path $env:RUNNER_TEMP 'gitea-28.4.0.exe'
+          $caddyZip = Join-Path $env:RUNNER_TEMP 'caddy-2.11.9.zip'
+          curl.exe --fail --silent --show-error --location --retry 3 --max-time 120 -o $gitea 'https://github.com/go-gitea/gitea/releases/download/v28.4.0/gitea-28.4.0-windows-amd64.exe'
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $gitea).Hash -ne 'f67cfc9179dbcf43d730622df5006ee2fa64f626422c734cea89af50f7ad7cc3') { throw 'Gitea asset failed verification.' }
+          curl.exe --fail --silent --show-error --location --retry 3 --max-time 120 -o $caddyZip 'https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_windows_amd64.zip'
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $caddyZip).Hash -ne 'ad93112d335ee687100c4c9f11bced16ca590377976b7fe7883882b9e797e472') { throw 'Caddy asset failed verification.' }
+          Expand-Archive -LiteralPath $caddyZip -DestinationPath "$env:RUNNER_TEMP\caddy-scm-lab"
       - name: Exercise Service Control Manager
         shell: pwsh
-        run: .\tests\windows-service-lab.ps1 -Executable "$env:RUNNER_TEMP\bridge-scm-lab.exe"
+        run: |
+          $bins = @{
+            Executable = "$env:RUNNER_TEMP\bridge-scm-lab.exe"
+            GiteaExecutable = "$env:RUNNER_TEMP\gitea-28.4.0.exe"
+            CaddyExecutable = "$env:RUNNER_TEMP\caddy-scm-lab\caddy.exe"
+          }
+          .\tests\windows-service-lab.ps1 @bins

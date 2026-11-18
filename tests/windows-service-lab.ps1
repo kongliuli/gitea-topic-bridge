@@ -1,6 +1,10 @@
 #Requires -Version 7.4
 [CmdletBinding()]
-param([Parameter(Mandatory)] [string]$Executable)
+param(
+    [Parameter(Mandatory)] [string]$Executable,
+    [Parameter(Mandatory)] [string]$GiteaExecutable,
+    [Parameter(Mandatory)] [string]$CaddyExecutable
+)
 
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
@@ -120,6 +124,41 @@ function Assert-LabStatus([string]$Url, [int]$Expected) {
     if ([int]$response.StatusCode -ne $Expected) { throw "Expected HTTP $Expected at $Url, got $($response.StatusCode)." }
 }
 
+function Start-LabUpstream([string]$Name, [string]$BinaryPath, [pscredential]$Credential) {
+    New-Service -Name $Name -BinaryPathName $BinaryPath -Credential $Credential -StartupType Manual | Out-Null
+    $script:services += $Name
+    Start-Service -Name $Name
+    $state = Wait-LabService $Name
+    $startName = $state.StartName -replace '^\.\\', "$env:COMPUTERNAME\"
+    $identity = [Security.Principal.NTAccount]::new($startName).Translate([Security.Principal.SecurityIdentifier])
+    $expected = [Security.Principal.NTAccount]::new($Credential.UserName).Translate([Security.Principal.SecurityIdentifier])
+    if ($identity -ne $expected) { throw "Unexpected account for $Name." }
+}
+
+function Wait-LabGitea([string]$Url, [string]$LogPath) {
+    $end = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        try {
+            if ((Invoke-WebRequest -NoProxy -TimeoutSec 2 -Uri "$Url/api/v1/version").StatusCode -eq 200) { return }
+        } catch {}
+        Start-Sleep -Milliseconds 300
+    } while ([DateTime]::UtcNow -lt $end)
+    if (Test-Path -LiteralPath $LogPath) { Get-Content -LiteralPath $LogPath -Tail 20 | Write-Host }
+    throw 'Gitea did not start serving the local API.'
+}
+
+function New-GiteaLabUser([string]$Binary, [string[]]$Flags, [string]$Name, [string]$Scopes) {
+    $arguments = $Flags + @('admin','user','create','--username',$Name,'--email',"$Name@example.invalid",
+        '--random-password','--must-change-password=false','--access-token','--access-token-name','scm-lab','--access-token-scopes',$Scopes)
+    if ($Name -eq 'labowner') { $arguments += '--admin' }
+    $output = (& $Binary @arguments 2>&1) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0) { throw "Gitea CLI could not create $Name." }
+    $token = [regex]::Match($output, '(?i)access token was successfully created[.:]+\s+([a-f0-9]{40})')
+    $password = [regex]::Match($output, "generated random password is '([^'\r\n]+)'")
+    if (-not $token.Success -or -not $password.Success) { throw "Gitea CLI did not return fixture credentials for $Name." }
+    return @{ Token = $token.Groups[1].Value; Password = $password.Groups[1].Value }
+}
+
 function Assert-LabAccess([pscredential]$Credential, [string]$Path, [bool]$Allowed) {
     $encodedPath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Path))
     $command = @'
@@ -146,20 +185,32 @@ catch { exit 1 }
 try {
     $bridge = New-LabAccount "BridgeSvc$suffix"
     $anchor = New-LabAccount "AnchorSvc$suffix"
+    $gitea = New-LabAccount "GiteaSvc$suffix"
+    $caddy = New-LabAccount "CaddySvc$suffix"
     $bridgeSID = $bridge.Account.SID.Value
     $anchorSID = $anchor.Account.SID.Value
     $bridgeRoot = Join-Path $root 'bridge'
     $anchorRoot = Join-Path $root 'anchor'
-    New-Item -ItemType Directory -Path $root,$bridgeRoot,$anchorRoot | Out-Null
-    Set-LabDirectoryAcl $root @{ $bridgeSID = 'ReadAndExecute'; $anchorSID = 'ReadAndExecute' }
+    $giteaRoot = Join-Path $root 'gitea'
+    $caddyRoot = Join-Path $root 'caddy'
+    $giteaSID = $gitea.Account.SID.Value
+    $caddySID = $caddy.Account.SID.Value
+    New-Item -ItemType Directory -Path $root,$bridgeRoot,$anchorRoot,$giteaRoot,$caddyRoot | Out-Null
+    Set-LabDirectoryAcl $root @{ $bridgeSID = 'ReadAndExecute'; $anchorSID = 'ReadAndExecute'; $giteaSID = 'ReadAndExecute'; $caddySID = 'ReadAndExecute' }
     Set-LabDirectoryAcl $bridgeRoot @{ $bridgeSID = 'Modify' }
     Set-LabDirectoryAcl $anchorRoot @{ $anchorSID = 'Modify' }
+    Set-LabDirectoryAcl $giteaRoot @{ $giteaSID = 'Modify' }
+    Set-LabDirectoryAcl $caddyRoot @{ $caddySID = 'Modify' }
     $app = Join-Path $root 'bridge lab.exe'
     Copy-Item -LiteralPath $Executable -Destination $app
+    $giteaApp = Join-Path $root 'gitea lab.exe'
+    $caddyApp = Join-Path $root 'caddy lab.exe'
+    Copy-Item -LiteralPath $GiteaExecutable -Destination $giteaApp
+    Copy-Item -LiteralPath $CaddyExecutable -Destination $caddyApp
 
-    $ports = @((New-LabListener), (New-LabListener))
+    $ports = @((New-LabListener), (New-LabListener), (New-LabListener), (New-LabListener))
     try {
-        $bridgePort, $anchorPort = $ports | ForEach-Object { $_.LocalEndpoint.Port }
+        $bridgePort, $anchorPort, $giteaPort, $gatewayPort = $ports | ForEach-Object { $_.LocalEndpoint.Port }
     } finally {
         $ports | ForEach-Object { $_.Stop() }
     }
@@ -167,17 +218,94 @@ try {
     $anchorListen = "127.0.0.1:$anchorPort"
     $bridgeUrl = "http://$bridgeListen"
     $anchorUrl = "http://$anchorListen"
+    $giteaUrl = "http://127.0.0.1:$giteaPort"
+    $gatewayAddress = "127.0.0.1:$gatewayPort"
+    $gatewayUrl = "https://$gatewayAddress"
+    $giteaIni = Join-Path $giteaRoot 'app.ini'
+    $giteaPath = $giteaRoot.Replace('\','/')
+    $giteaLog = Join-Path $giteaRoot 'log/gitea.log'
+    $gitExecutable = (Get-Command git.exe).Source.Replace('\','/')
+    @"
+[server]
+HTTP_ADDR = 127.0.0.1
+HTTP_PORT = $giteaPort
+ROOT_URL = $gatewayUrl/
+PUBLIC_URL_DETECTION = never
+LOCAL_ROOT_URL = $giteaUrl/
+DISABLE_SSH = true
+SSH_ROOT_PATH = $giteaPath/ssh
+SSH_CREATE_AUTHORIZED_KEYS_FILE = false
+SSH_CREATE_AUTHORIZED_PRINCIPALS_FILE = false
+OFFLINE_MODE = true
+APP_DATA_PATH = $giteaPath/data
+[database]
+DB_TYPE = sqlite3
+PATH = $giteaPath/data/gitea.db
+[repository]
+ROOT = $giteaPath/repos
+[security]
+INSTALL_LOCK = true
+[service]
+DISABLE_REGISTRATION = true
+[actions]
+ENABLED = false
+[git]
+PATH = $gitExecutable
+[log]
+MODE = file
+ROOT_PATH = $giteaPath/log
+LEVEL = warn
+"@ | Set-Content -LiteralPath $giteaIni -Encoding utf8NoBOM
+    $giteaTemplate = Join-Path $giteaRoot 'custom/templates/custom'
+    New-Item -ItemType Directory -Path $giteaTemplate | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../examples/gitea/extra_links.tmpl') -Destination $giteaTemplate
+    $giteaFlags = @('--work-path', $giteaRoot, '--config', $giteaIni)
+    Start-LabUpstream "GiteaLab$suffix" ('"{0}" --work-path "{1}" --config "{2}" web' -f $giteaApp,$giteaRoot,$giteaIni) $gitea.Credential
+    Wait-LabGitea $giteaUrl $giteaLog
+    $owner = New-GiteaLabUser $giteaApp $giteaFlags 'labowner' 'all'
+    $reader = New-GiteaLabUser $giteaApp $giteaFlags 'labreader' 'read:repository,read:user'
+    $api = @{
+        Headers = @{ Authorization = "Bearer $($owner.Token)" }; ContentType = 'application/json'
+        TimeoutSec = 15; NoProxy = $true
+    }
+    $repo = Invoke-RestMethod @api -Method Post -Uri "$giteaUrl/api/v1/user/repos" -Body '{"name":"fixture","private":true,"auto_init":true,"default_branch":"main"}'
+    $null = Invoke-RestMethod @api -Method Put -Uri "$giteaUrl/api/v1/repos/labowner/fixture/collaborators/labreader" -Body '{"permission":"read"}'
+    $oauthBody = @{ name='Bridge SCM lab'; confidential_client=$true; redirect_uris=@("$gatewayUrl/bridge/auth/callback") }
+    $oauth = Invoke-RestMethod @api -Method Post -Uri "$giteaUrl/api/v1/user/applications/oauth2" -Body ($oauthBody | ConvertTo-Json -Compress)
+    $caddyPath = $caddyRoot.Replace('\','/')
+    $caddyConfig = Join-Path $caddyRoot 'Caddyfile'
+    $caddyGlobal = @"
+{
+    admin off
+    persist_config off
+    skip_install_trust
+    auto_https disable_redirects
+    default_bind 127.0.0.1
+    servers {
+        protocols h1 h2
+    }
+    storage file_system {
+        root "$caddyPath/storage"
+    }
+}
+"@
+    $caddySite = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '../examples/Caddyfile')
+    ($caddyGlobal + [Environment]::NewLine + $caddySite.Replace('git.office.example:8443', $gatewayAddress).
+        Replace('127.0.0.1:3000', "127.0.0.1:$giteaPort").Replace('127.0.0.1:3001', $bridgeListen)) |
+        Set-Content -LiteralPath $caddyConfig -Encoding utf8NoBOM
+    Start-LabUpstream "CaddyLab$suffix" ('"{0}" run --config "{1}" --adapter caddyfile' -f $caddyApp,$caddyConfig) $caddy.Credential
+
     $config = Join-Path $bridgeRoot 'bridge config.json'
     $bridgeSecrets = Join-Path $bridgeRoot 'bridge secrets.json'
     $anchorSecrets = Join-Path $anchorRoot 'anchor secrets.json'
     @{
-        public_base_url = "$bridgeUrl/bridge/"; gitea_public_url = 'http://127.0.0.1:3000/'
-        gitea_api_url = 'http://127.0.0.1:3000/'; client_id = 'lab-fixture'; allow_loopback_http = $true
+        public_base_url = "$gatewayUrl/bridge/"; gitea_public_url = "$gatewayUrl/"
+        gitea_api_url = "$giteaUrl/"; client_id = $oauth.client_id
         database_path = Join-Path $bridgeRoot 'bridge.sqlite3'
         page_size = 5; max_pages = 2
-        projects = @(@{ id='lab'; name='Lab'; repositories=@(@{ id=1; owner='fixture'; name='fixture' }) })
+        projects = @(@{ id='lab'; name='Lab'; repositories=@(@{ id=$repo.id; owner='labowner'; name='fixture' }) })
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $config -Encoding utf8NoBOM
-    @{ oauth_client_secret = 'scm-lab-fixture' } | ConvertTo-Json | Set-Content -LiteralPath $bridgeSecrets -Encoding utf8NoBOM
+    @{ oauth_client_secret = $oauth.client_secret } | ConvertTo-Json | Set-Content -LiteralPath $bridgeSecrets -Encoding utf8NoBOM
     @{
         anchor_signing_seed = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
         anchor_bearer = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
@@ -225,7 +353,7 @@ try {
     Assert-LabAccess $bridge.Credential $anchorSecrets $false
     Assert-LabAccess $anchor.Credential $anchorSecrets $true
     Assert-LabAccess $anchor.Credential $bridgeSecrets $false
-    foreach ($port in @($bridgePort, $anchorPort)) {
+    foreach ($port in @($bridgePort, $anchorPort, $giteaPort, $gatewayPort)) {
         $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port)
         if ($listeners.Count -ne 1 -or $listeners[0].LocalAddress -ne '127.0.0.1') { throw "Unexpected listener on port $port." }
     }
@@ -239,11 +367,19 @@ try {
     Assert-LabStatus "$bridgeUrl/bridge/" 200
     Write-Host "SCM restarted Bridge after terminating the fixture process: $($current.ProcessId) -> $($recovered.ProcessId)."
 
+    $env:BRIDGE_TEST_SCM_STACK = Join-Path $root 'client fixture.json'
+    @{
+        gateway = $gatewayUrl; ca = Join-Path $caddyRoot 'storage/pki/authorities/local/root.crt'
+        repository_id = $repo.id; password = $reader.Password
+    } | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
+    & go test -v -timeout 2m -run '^TestSCMHostedStack$' -count=1 .
+    if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted stack did not pass HTTPS acceptance.' }
+
     foreach ($serviceName in $services) {
         Stop-Service -Name $serviceName
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [timespan]::FromSeconds(20))
     }
-    Write-Host 'Both services accepted SCM stop.'
+    Write-Host 'All four services accepted SCM stop.'
 } finally {
     foreach ($serviceName in $services) {
         Stop-Service -Name $serviceName -ErrorAction SilentlyContinue
