@@ -185,9 +185,11 @@ go test -v -timeout 3m -run '^TestGiteaColdRestoreLab$' -count=1 ./...
 
 启动恢复服务前，离线核验通过一张联调单、一份签名回执、一份制品快照和一份独立存证凭证。启动后，用原普通账号登录，读到同一联调单、Git 分支和试点 PR，重新下载的回执和凭证逐字节一致。主干保护仍要求至少一人批准，普通开发者通过恢复后的 HTTPS 网关推送获准的新分支。Bridge 账号能读取恢复的收件制品，无法修改制品或读取 Gitea 数据库与存证账本。[联合恢复验收记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44390713885)
 
-## 已验证：合成旧仓试点导入
+## 已验证：模拟仓试点、切换与回退
 
-从合成的旧裸仓克隆到临时目录，再将两个分支和一个带注解的标签推到新的空私有 Gitea 仓。逐项核对对象 ID，确认旧裸仓引用保持原样且通过 `git fsck`。配置新仓主干保护后创建一条试点 PR，普通只读账号通过 Bridge 读到与 Gitea 一致的 PR 编号和 head SHA。测试日志记录新仓 ID 和试点 PR；真实试点和按批切换待现场执行。
+从合成的旧裸仓克隆到临时目录，再将两个分支和一个带注解的标签推到新的空私有 Gitea 仓。逐项核对对象 ID，确认旧裸仓引用保持原样且通过 `git fsck`。配置新仓主干保护后，由普通开发者创建一条试点 PR，独立只读账号通过 Bridge 读到与 Gitea 一致的 PR 编号和 head SHA。测试日志记录新仓 ID 和试点 PR。
+
+试点通过后迁移第二个模拟仓。测试发现暂存副本落后于旧仓的最后一次提交，冻结旧仓后确认推送被拒绝，再补齐暂存副本并核对分支和标签。切换客户端的 `origin` 后，普通开发者可将新提交推到工作分支，主干仍拒绝直接推送。回退前，从新仓制作 Git bundle，用另一个空目录恢复并验证全部分支、标签、默认分支及新增提交。客户端切回旧入口后，两边的服务器引用均保持原样。实际业务仓的试点与批次切换仍须现场验收。[Windows 切换与回退记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44394705743)
 
 ```powershell
 $env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
