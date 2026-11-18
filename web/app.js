@@ -9,6 +9,8 @@ const project = form.elements.namedItem('project_id');
 const topic = form.elements.namedItem('topic');
 const statuses = { complete: '已查完', incomplete: '未查完', failed: '查询失败' };
 const lifecycles = { merged: '已合并', open: '开放', closed: '关闭未合并' };
+const checks = { success: '已报告的检查通过', pending: '等待中', warning: '警告', failure: '失败', error: '出错', skipped: '跳过', not_reported: '未报告' };
+const conflicts = { none_reported: '未报告冲突', not_mergeable_reason_unknown: 'Gitea 暂不可合并，原因未知', not_applicable: '不适用' };
 let activeQuery;
 
 function element(tag, text) {
@@ -50,7 +52,9 @@ function showResults(data) {
       const link = element('a', `#${pull.number} ${pull.title}`);
       link.href = pull.url;
       line.append(link, element('p', `${lifecycles[pull.lifecycle] ?? '未知'} · head ${pull.head_sha || '未知'}`));
-      line.append(element('p', 'CI：未知 · 冲突：未知 · 审批：未知 · 变更文件数：未知'));
+      const reviews = pull.reviews ? `批准 ${pull.reviews.approved}，要求修改 ${pull.reviews.changes_requested}（当前提交，不代表满足合并规则）` : '未知';
+      line.append(element('p', `CI：${checks[pull.ci] ?? '未知'} · 冲突：${conflicts[pull.conflict] ?? '未知'} · 变更文件数：${pull.changed_files ?? '未知'}`));
+      line.append(element('p', `正式评审：${reviews} · 读取于 ${new Date(pull.read_at).toLocaleString()}`));
       card.append(line);
     }
     results.append(card);

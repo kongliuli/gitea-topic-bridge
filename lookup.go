@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var topicPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9-]{0,63}$`)
@@ -21,12 +22,22 @@ type Repository struct {
 }
 
 type PullRequest struct {
-	Number    int64  `json:"number"`
-	Title     string `json:"title"`
-	Body      string `json:"-"`
-	Lifecycle string `json:"lifecycle"`
-	HeadSHA   string `json:"head_sha"`
-	URL       string `json:"url"`
+	Number       int64           `json:"number"`
+	Title        string          `json:"title"`
+	Body         string          `json:"-"`
+	Lifecycle    string          `json:"lifecycle"`
+	HeadSHA      string          `json:"head_sha"`
+	URL          string          `json:"url"`
+	ReadAt       time.Time       `json:"read_at"`
+	ChangedFiles *int            `json:"changed_files"`
+	CI           string          `json:"ci,omitempty"`
+	Conflict     string          `json:"conflict,omitempty"`
+	Reviews      *ReviewEvidence `json:"reviews"`
+}
+
+type ReviewEvidence struct {
+	Approved         int `json:"approved"`
+	ChangesRequested int `json:"changes_requested"`
 }
 
 type Page struct {
@@ -94,6 +105,7 @@ func Lookup(ctx context.Context, source Source, repositories []Repository, topic
 				if !seenPRs[pull.Number] && (strings.Contains(pull.Title, marker) || strings.Contains(pull.Body, marker)) {
 					seenPRs[pull.Number] = true
 					pull.Body = ""
+					pull.ReadAt = time.Now().UTC()
 					result.PullRequests = append(result.PullRequests, pull)
 				}
 			}

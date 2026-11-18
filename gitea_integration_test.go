@@ -50,6 +50,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	}
 	ownerToken, _ := createUser("labowner", "all", "--admin")
 	readerToken, readerPassword := createUser("labreader", "read:repository,read:user")
+	reviewerToken, _ := createUser("labreviewer", "write:repository,read:user")
 	api := func(method, path string, data, out any, status int) {
 		t.Helper()
 		labAPI(t, base, ownerToken, method, path, data, out, status)
@@ -74,9 +75,9 @@ func TestGiteaLocalLab(t *testing.T) {
 	}
 	merged := seedPull("merged", "complete", "[Topic: CAD-01] Merged fixture", "")
 	api("POST", fmt.Sprintf("/repos/labowner/merged/pulls/%d/merge", merged), map[string]string{"Do": "merge"}, nil, 200)
-	seedPull("conflict", "changes", "Open fixture", "[Topic: CAD-01]")
+	conflicting := seedPull("conflict", "changes", "Open fixture", "[Topic: CAD-01]")
 	api("POST", "/repos/labowner/conflict/contents/changes.txt", map[string]string{"branch": "main", "message": "Conflicting fixture", "content": "b3RoZXIK"}, nil, 201)
-	seedPull("conflict", "followup", "[Topic: CAD-01] Second fixture", "")
+	approved := seedPull("conflict", "followup", "[Topic: CAD-01] Second fixture", "")
 	seedPull("no-match", "other", "[Topic: CAD-010] Other fixture", "")
 	seedPull("hidden", "secret", "[Topic: CAD-01] Hidden fixture", "")
 	client, err := NewGitea(base, base, readerToken, 1)
@@ -103,11 +104,39 @@ func TestGiteaLocalLab(t *testing.T) {
 		results[1].PullRequests[0].HeadSHA == "" || results[2].Status != "complete" || len(results[2].PullRequests) != 0 {
 		t.Fatalf("full lookup: %#v", results)
 	}
+	for _, pull := range results[1].PullRequests {
+		state := "failure"
+		if pull.Number == approved {
+			state = "success"
+		}
+		api("POST", "/repos/labowner/conflict/statuses/"+pull.HeadSHA, map[string]string{"state": state, "context": "fixture/check"}, nil, 201)
+	}
+	api("PUT", "/repos/labowner/conflict/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
+	labAPI(t, base, reviewerToken, "POST", fmt.Sprintf("/repos/labowner/conflict/pulls/%d/reviews", approved), map[string]string{"event": "APPROVED", "body": "Synthetic verified review"}, nil, 200)
 	browser, bridgeURL := loginLab(t, base, ownerToken, readerPassword, repos)
 	lookupURL := bridgeURL + "/bridge/api/topics/lookup?project_id=lab&topic=CAD-01"
 	data := loadLabPage(t, browser, lookupURL, nil, 200)
 	if !strings.Contains(data, `"name":"conflict"`) || !strings.Contains(data, `"lifecycle":"merged"`) || strings.Contains(data, `"name":"hidden"`) {
 		t.Fatal("OAuth lookup did not use the reader's repository visibility")
+	}
+	var detailed struct{ Repositories []RepositoryResult }
+	if err := json.Unmarshal([]byte(data), &detailed); err != nil {
+		t.Fatal(err)
+	}
+	checks := make(map[int64]PullRequest)
+	for _, repo := range detailed.Repositories {
+		if repo.Repository.Name == "conflict" {
+			for _, pull := range repo.PullRequests {
+				checks[pull.Number] = pull
+			}
+		}
+	}
+	valid := checks[approved]
+	if valid.CI != "success" || valid.ChangedFiles == nil || *valid.ChangedFiles != 1 || valid.Conflict != "none_reported" || valid.Reviews == nil || valid.Reviews.Approved != 1 {
+		t.Fatalf("clean reviewed PR did not expose verified checks: %+v", valid)
+	}
+	if blocked := checks[conflicting]; blocked.CI != "failure" || blocked.Conflict != "not_mergeable_reason_unknown" {
+		t.Fatalf("conflicting fixture was not distinguished from clean PR: %+v", blocked)
 	}
 	api("DELETE", "/repos/labowner/conflict/collaborators/labreader", nil, nil, 204)
 	results = lookup(3)

@@ -198,6 +198,11 @@ func (server *Server) lookupTopic(writer http.ResponseWriter, request *http.Requ
 		server.upstreamProblem(writer, request, err)
 		return
 	}
+	results, err = client.inspectMatches(request.Context(), results)
+	if err != nil {
+		server.upstreamProblem(writer, request, err)
+		return
+	}
 	if len(results) == 0 {
 		responseProblem(writer, http.StatusNotFound, "project_not_found")
 		return
