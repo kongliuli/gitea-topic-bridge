@@ -115,7 +115,7 @@ PRAGMA user_version=1;`); err != nil {
 			return err
 		}
 		fallthrough
-	case 1, 2, 3, 4, 5:
+	case 1, 2, 3, 4, 5, 6:
 		if version != 0 && applicationID != bridgeApplicationID {
 			return errors.New("database is not owned by Bridge")
 		}
@@ -186,6 +186,30 @@ CREATE TABLE webhook_inbox (
 ) STRICT;
 CREATE INDEX webhook_ready ON webhook_inbox(available_at_ns, received_at_ns) WHERE observation IS NULL;
 PRAGMA user_version=5;`); err != nil {
+			return err
+		}
+	}
+	if version < 6 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE delivery_receipts (
+    id TEXT PRIMARY KEY,
+    topic_id TEXT NOT NULL REFERENCES topic_changesets(id),
+    previous_id TEXT UNIQUE REFERENCES delivery_receipts(id),
+    issuer_id INTEGER NOT NULL CHECK(issuer_id > 0),
+    request_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    envelope TEXT NOT NULL CHECK(json_valid(envelope)),
+    UNIQUE (issuer_id, request_key)
+) STRICT;
+CREATE TRIGGER receipt_no_update BEFORE UPDATE ON delivery_receipts BEGIN
+    SELECT RAISE(ABORT, 'delivery receipts cannot be overwritten');
+END;
+CREATE TRIGGER receipt_no_delete BEFORE DELETE ON delivery_receipts BEGIN
+    SELECT RAISE(ABORT, 'delivery receipts cannot be deleted');
+END;
+CREATE INDEX receipts_by_topic ON delivery_receipts(topic_id);
+CREATE UNIQUE INDEX receipt_initial_version ON delivery_receipts(topic_id) WHERE previous_id IS NULL;
+PRAGMA user_version=6;`); err != nil {
 			return err
 		}
 	}

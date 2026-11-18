@@ -33,6 +33,9 @@ func loadConfig(path string) (bridge.ServerConfig, error) {
 		return config, errors.New("invalid Bridge config JSON")
 	}
 	config.ClientSecret = os.Getenv("BRIDGE_OAUTH_CLIENT_SECRET")
+	if config.Receipts != nil {
+		config.Receipts.SigningSeed = os.Getenv("BRIDGE_RECEIPT_SIGNING_SEED")
+	}
 	return config, nil
 }
 
@@ -40,7 +43,16 @@ func main() {
 	configPath := flag.String("config", "bridge.json", "path to Bridge JSON configuration")
 	listen := flag.String("listen", "127.0.0.1:3001", "loopback HTTP listen address")
 	hookListen := flag.String("hook-listen", "", "optional dedicated loopback listen address for Gitea webhooks")
+	verify := flag.String("verify-receipt", "", "verify a receipt JSON file and exit")
+	trustedKey := flag.String("trusted-receipt-key", "", "trusted Ed25519 public key (base64) for receipt verification")
 	flag.Parse()
+	if *verify != "" {
+		if err := verifyReceiptFile(*verify, *trustedKey); err != nil {
+			log.Fatal(err)
+		}
+		log.Print("receipt signature verified")
+		return
+	}
 	host, _, err := net.SplitHostPort(*listen)
 	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
 		log.Fatal("-listen must be a numeric loopback address and port")

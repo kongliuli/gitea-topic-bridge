@@ -301,6 +301,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	if remaining == nil || remaining.State != "blocked" || remaining.ResultCode != "pull_not_ready" || readMergeTarget(repos[1], batch.Members[1], false).Merged {
 		t.Fatalf("conflicting repository did not stay blocked: %+v", remaining)
 	}
+	verifyReceiptLab(t, base, ownerToken, writer, writerURL, batch.ID, repos, release.ID, actualMerge.SHA, mergedBatch.Members[2].Merge.MergeSHA)
 	revertURL := func(member TopicMember) string {
 		return fmt.Sprintf("%s/bridge/api/topics/%s/members/%d/revert-pr", writerURL, batch.ID, member.ID)
 	}
@@ -411,6 +412,21 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	t.Cleanup(func() { store.Close() })
 	app := httptest.NewUnstartedServer(nil)
 	bridgeURL := "http://" + app.Listener.Addr().String()
+	var receipts *ReceiptConfig
+	if username == "labreviewer" {
+		artifactRoot := t.TempDir()
+		repoFolder := filepath.Join(artifactRoot, fmt.Sprint(repos[2].ID))
+		if err := os.Mkdir(repoFolder, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repoFolder, "bundle.txt"), []byte("fixture delivery\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var owner struct{ ID int64 }
+		labAPI(t, giteaURL, ownerToken, "GET", "/users/labreviewer", nil, &owner, 200)
+		receipts = &ReceiptConfig{ArtifactRoot: artifactRoot, SnapshotRoot: t.TempDir(), Issuers: []int64{owner.ID},
+			SigningSeed: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{17}, 32))}
+	}
 	var creds struct {
 		ID     string `json:"client_id"`
 		Secret string `json:"client_secret"`
@@ -421,6 +437,7 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	handler, err := NewServer(ServerConfig{PublicBaseURL: bridgeURL + "/bridge/", GiteaPublicURL: giteaURL, GiteaAPIURL: giteaURL,
 		ClientID: creds.ID, ClientSecret: creds.Secret, AllowLoopbackHTTP: true, PageSize: 1, MaxPages: 3,
 		TopicStore: store, EnablePullCreation: true, EnableMerge: true, EnableRevert: true,
+		Receipts: receipts,
 		Projects: []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
 	})
 	if err != nil {

@@ -20,20 +20,21 @@ type Project struct {
 }
 
 type ServerConfig struct {
-	PublicBaseURL      string      `json:"public_base_url"`
-	GiteaPublicURL     string      `json:"gitea_public_url"`
-	GiteaAPIURL        string      `json:"gitea_api_url"`
-	ClientID           string      `json:"client_id"`
-	ClientSecret       string      `json:"-"`
-	DatabasePath       string      `json:"database_path"`
-	TopicStore         *TopicStore `json:"-"`
-	AllowLoopbackHTTP  bool        `json:"allow_loopback_http"`
-	EnablePullCreation bool        `json:"enable_pull_creation"`
-	EnableMerge        bool        `json:"enable_merge"`
-	EnableRevert       bool        `json:"enable_revert"`
-	PageSize           int         `json:"page_size"`
-	MaxPages           int         `json:"max_pages"`
-	Projects           []Project   `json:"projects"`
+	PublicBaseURL      string         `json:"public_base_url"`
+	GiteaPublicURL     string         `json:"gitea_public_url"`
+	GiteaAPIURL        string         `json:"gitea_api_url"`
+	ClientID           string         `json:"client_id"`
+	ClientSecret       string         `json:"-"`
+	DatabasePath       string         `json:"database_path"`
+	TopicStore         *TopicStore    `json:"-"`
+	AllowLoopbackHTTP  bool           `json:"allow_loopback_http"`
+	EnablePullCreation bool           `json:"enable_pull_creation"`
+	EnableMerge        bool           `json:"enable_merge"`
+	EnableRevert       bool           `json:"enable_revert"`
+	Receipts           *ReceiptConfig `json:"receipts,omitempty"`
+	PageSize           int            `json:"page_size"`
+	MaxPages           int            `json:"max_pages"`
+	Projects           []Project      `json:"projects"`
 }
 
 type Server struct {
@@ -44,6 +45,7 @@ type Server struct {
 	gate                          chan struct{}
 	pending                       expiringStore[loginAttempt]
 	sessions                      expiringStore[string]
+	receipts                      *receiptService
 }
 
 var projectID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -52,7 +54,7 @@ var projectID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 var site embed.FS
 
 func NewServer(config ServerConfig) (http.Handler, error) {
-	if (config.EnablePullCreation || config.EnableMerge || config.EnableRevert) && config.TopicStore == nil {
+	if (config.EnablePullCreation || config.EnableMerge || config.EnableRevert || config.Receipts != nil) && config.TopicStore == nil {
 		return nil, errors.New("write features require a Bridge database")
 	}
 	public, publicErr := baseURL(config.PublicBaseURL)
@@ -68,6 +70,13 @@ func NewServer(config ServerConfig) (http.Handler, error) {
 		return nil, errors.New("OAuth credentials, pagination settings or project count are invalid")
 	}
 	server := &Server{config: config, public: public, giteaPublic: giteaPublic, giteaAPI: giteaAPI, http: newUpstreamClient(), projects: make(map[string]Project), gate: make(chan struct{}, 16)}
+	if config.Receipts != nil {
+		service, err := newReceiptService(*config.Receipts)
+		if err != nil {
+			return nil, err
+		}
+		server.receipts = service
+	}
 	repoVerifier := Gitea{apiBase: giteaAPI}
 	for _, project := range config.Projects {
 		if !projectID.MatchString(project.ID) || strings.TrimSpace(project.Name) == "" || len(project.Name) > 160 || len(project.Repositories) < 1 || len(project.Repositories) > 64 || server.projects[project.ID].ID != "" {
@@ -103,6 +112,11 @@ func NewServer(config ServerConfig) (http.Handler, error) {
 	}
 	if config.EnableRevert {
 		mux.HandleFunc("POST /bridge/api/topics/{id}/members/{member}/revert-pr", server.withUser(server.revertTopicMember))
+	}
+	if server.receipts != nil {
+		mux.HandleFunc("POST /bridge/api/receipts", server.withUser(server.createReceipt))
+		mux.HandleFunc("GET /bridge/api/receipts/{id}", server.withUser(server.getReceipt))
+		mux.HandleFunc("GET /bridge/api/receipt-key", server.receiptKey)
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
