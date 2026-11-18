@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-func verifySCMPilot(t *testing.T, browser *http.Client, fixture scmStackFixture) {
+func verifySCMPilot(t *testing.T, browser *http.Client, fixture scmStackFixture) PullRequest {
 	t.Helper()
 	api, err := url.Parse(fixture.GiteaAPI)
 	if err != nil || api.Scheme != "http" || api.Hostname() != "127.0.0.1" || api.User != nil ||
@@ -81,15 +81,7 @@ func verifySCMPilot(t *testing.T, browser *http.Client, fixture scmStackFixture)
 	labAPI(t, fixture.GiteaAPI, fixture.DeveloperToken, "POST", path+"/pulls", map[string]string{
 		"title": "[Topic: CAD-PILOT] Verify imported history", "base": "main", "head": "pilot-check",
 	}, &pull, 201)
-	raw := loadLabPage(t, browser, fixture.Gateway+"/bridge/api/topics/lookup?project_id=pilot&topic=CAD-PILOT", nil, 200)
-	var result struct {
-		Repositories []RepositoryResult
-	}
-	if err := json.Unmarshal([]byte(raw), &result); err != nil || len(result.Repositories) != 1 ||
-		result.Repositories[0].Repository.ID != fixture.PilotID || len(result.Repositories[0].PullRequests) != 1 {
-		t.Fatalf("the read-only Bridge pilot lookup did not return the imported repo and PR: %v", err)
-	}
-	match := result.Repositories[0].PullRequests[0]
+	match := lookupSCMPilot(t, browser, fixture)
 	if match.Number != pull.Number || !commitSHA.MatchString(match.HeadSHA) || match.HeadSHA != pull.Head.SHA {
 		t.Fatal("the Bridge pilot PR did not match Gitea")
 	}
@@ -98,4 +90,18 @@ func verifySCMPilot(t *testing.T, browser *http.Client, fixture scmStackFixture)
 	}
 	t.Logf("Imported public main %s (%s commits, %d tags); private HTTPS clone and PR #%d verified, source refs unchanged.",
 		head, history, len(expected)-1, pull.Number)
+	return match
+}
+
+func lookupSCMPilot(t *testing.T, browser *http.Client, fixture scmStackFixture) PullRequest {
+	t.Helper()
+	raw := loadLabPage(t, browser, fixture.Gateway+"/bridge/api/topics/lookup?project_id=pilot&topic=CAD-PILOT", nil, 200)
+	var result struct {
+		Repositories []RepositoryResult
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil || len(result.Repositories) != 1 ||
+		result.Repositories[0].Repository.ID != fixture.PilotID || len(result.Repositories[0].PullRequests) != 1 {
+		t.Fatalf("the read-only Bridge pilot lookup did not return the imported repo and PR: %v", err)
+	}
+	return result.Repositories[0].PullRequests[0]
 }

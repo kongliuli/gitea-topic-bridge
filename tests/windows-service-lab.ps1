@@ -141,6 +141,20 @@ function Wait-LabService([string]$Name, [int]$DifferentFrom = 0) {
     throw "Service $Name did not become Running with a new process."
 }
 
+function Stop-LabStack([string[]]$StartOrder, [int[]]$ListenPorts) {
+    for ($i = $StartOrder.Count - 1; $i -ge 0; $i--) {
+        $service = $StartOrder[$i]
+        Stop-Service -Name $service
+        (Get-Service -Name $service).WaitForStatus('Stopped', [timespan]::FromSeconds(20))
+    }
+    foreach ($port in $ListenPorts) {
+        if (@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue).Count -ne 0) {
+            throw "Port $port remained in Listen after all services stopped."
+        }
+    }
+    Write-Host 'All four services accepted SCM stop and released their listeners.'
+}
+
 function Assert-LabStatus([string]$Url, [int]$Expected) {
     $response = Invoke-WebRequest -Uri $Url -NoProxy -SkipHttpErrorCheck -TimeoutSec 5
     if ([int]$response.StatusCode -ne $Expected) { throw "Expected HTTP $Expected at $Url, got $($response.StatusCode)." }
@@ -296,7 +310,8 @@ LEVEL = warn
     New-Item -ItemType Directory -Path $giteaTemplate | Out-Null
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../examples/gitea/extra_links.tmpl') -Destination $giteaTemplate
     $giteaFlags = @('--work-path', $giteaRoot, '--config', $giteaIni)
-    Start-LabUpstream "GiteaLab$suffix" ('"{0}" --work-path "{1}" --config "{2}" web' -f $giteaApp,$giteaRoot,$giteaIni) $gitea.Credential
+    $giteaService = "GiteaLab$suffix"
+    Start-LabUpstream $giteaService ('"{0}" --work-path "{1}" --config "{2}" web' -f $giteaApp,$giteaRoot,$giteaIni) $gitea.Credential
     Wait-LabGitea $giteaUrl $giteaLog
     $owner = New-GiteaLabUser $giteaApp $giteaFlags 'labowner' 'all'
     $reader = New-GiteaLabUser $giteaApp $giteaFlags 'labreader' 'read:repository,read:user'
@@ -334,7 +349,8 @@ LEVEL = warn
     ($caddyGlobal + [Environment]::NewLine + $caddySite.Replace('git.office.example:8443', $gatewayAddress).
         Replace('127.0.0.1:3000', "127.0.0.1:$giteaPort").Replace('127.0.0.1:3001', $bridgeListen)) |
         Set-Content -LiteralPath $caddyConfig -Encoding utf8NoBOM
-    Start-LabUpstream "CaddyLab$suffix" ('"{0}" run --config "{1}" --adapter caddyfile' -f $caddyApp,$caddyConfig) $caddy.Credential
+    $caddyService = "CaddyLab$suffix"
+    Start-LabUpstream $caddyService ('"{0}" run --config "{1}" --adapter caddyfile' -f $caddyApp,$caddyConfig) $caddy.Credential
 
     $config = Join-Path $bridgeSettings 'bridge config.json'
     $bridgeSecrets = Join-Path $bridgeSettings 'bridge secrets.json'
@@ -394,7 +410,8 @@ LEVEL = warn
     Assert-LabAccess $bridge.Credential $artifact $false 'Write'
     Assert-LabAccess $bridge.Credential (Join-Path $giteaRoot 'data/gitea.db') $false
     Assert-LabAccess $bridge.Credential $anchorRegistration.AnchorDatabase $false
-    foreach ($port in @($bridgePort, $anchorPort, $giteaPort, $gatewayPort)) {
+    $listenPorts = @($bridgePort, $anchorPort, $giteaPort, $gatewayPort)
+    foreach ($port in $listenPorts) {
         $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port)
         if ($listeners.Count -ne 1 -or $listeners[0].LocalAddress -ne '127.0.0.1') { throw "Unexpected listener on port $port." }
     }
@@ -409,20 +426,34 @@ LEVEL = warn
     Write-Host "SCM restarted Bridge after terminating the fixture process: $($current.ProcessId) -> $($recovered.ProcessId)."
 
     $env:BRIDGE_TEST_SCM_STACK = Join-Path $clientRoot 'client fixture.json'
+    $caPath = Join-Path $caddyRoot 'storage/pki/authorities/local/root.crt'
     @{
-        gateway = $gatewayUrl; ca = Join-Path $caddyRoot 'storage/pki/authorities/local/root.crt'
+        gateway = $gatewayUrl; ca = $caPath
         repository_id = $repo.id; password = $reader.Password; anchor_public_key = $anchorKey.Groups[1].Value
+        anchor_url = "$anchorUrl/v1/anchors"; anchor_bearer = $anchorBearer
         gitea_api = $giteaUrl; owner_token = $owner.Token; owner_password = $owner.Password
         developer_token = $developer.Token; pilot_id = $pilot.id
     } | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
     & go test -v -timeout 2m -run '^TestSCMHostedStack$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted stack did not pass HTTPS acceptance.' }
 
-    foreach ($serviceName in $services) {
-        Stop-Service -Name $serviceName
-        (Get-Service -Name $serviceName).WaitForStatus('Stopped', [timespan]::FromSeconds(20))
+    $startOrder = @($giteaService, $anchorService, $bridgeService, $caddyService)
+    $caHash = (Get-FileHash -LiteralPath $caPath).Hash
+    $originalProcesses = @{}
+    foreach ($serviceName in $startOrder) {
+        $originalProcesses[$serviceName] = (Wait-LabService $serviceName).ProcessId
     }
-    Write-Host 'All four services accepted SCM stop.'
+    Stop-LabStack $startOrder $listenPorts
+    foreach ($serviceName in $startOrder) {
+        Start-Service -Name $serviceName
+        $null = Wait-LabService $serviceName $originalProcesses[$serviceName]
+        if ($serviceName -eq $giteaService) { Wait-LabGitea $giteaUrl $giteaLog }
+    }
+    if ((Get-FileHash -LiteralPath $caPath).Hash -ne $caHash) { throw 'Caddy CA changed after the SCM restart.' }
+    Write-Host 'All four services started again with new processes and the original Caddy CA.'
+    & go test -v -timeout 2m -run '^TestSCMHostedStackAfterRestart$' -count=1 .
+    if ($LASTEXITCODE -ne 0) { throw 'The restarted SCM stack did not retain its original data.' }
+    Stop-LabStack $startOrder $listenPorts
 } finally {
     foreach ($serviceName in $services) {
         Stop-Service -Name $serviceName -ErrorAction SilentlyContinue
