@@ -17,8 +17,10 @@ const conflicts = { none_reported: '未报告冲突', not_mergeable_reason_unkno
 let activeQuery;
 let storeEnabled = false;
 let writesEnabled = false;
+let mergeEnabled = false;
 let draft;
 let savedBatch;
+let mergeBusy = false;
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -191,6 +193,7 @@ async function openSavedTopic(id, note = '') {
   activeQuery?.abort();
   const query = new AbortController();
   activeQuery = query;
+  results.replaceChildren();
   message.textContent = '正在读取联调单…';
   try {
     const response = await fetch(`/bridge/api/topics/${encodeURIComponent(id)}`, { signal: query.signal });
@@ -213,7 +216,9 @@ async function openSavedTopic(id, note = '') {
       const status = [operationStates[member.state] ?? '未知', reasons[member.result_code]].filter(Boolean).join(' · ');
       card.append(element('p', `${member.source_branch} → ${member.target_branch} · ${status}`));
       if (member.pull_number) {
-        card.append(element('p', `已关联 #${member.pull_number}`));
+        const repoResult = repos.find((item) => item.repository.id === repo.id);
+        const pull = repoResult.pull_requests.find((item) => item.number === member.pull_number);
+        renderMerge(card, id, member, pull);
       } else if (writesEnabled) {
         const include = inputRow(card, member.state === 'unconfirmed' ? '仅核对此仓的 PR' : '选中此仓建 PR', 'checkbox');
         selected.push({ include, member });
@@ -223,12 +228,70 @@ async function openSavedTopic(id, note = '') {
     createPulls.disabled = false;
     createPulls.hidden = !selected.length;
     savedTopic.hidden = false;
-    savedTopic.textContent = `联调单 ${data.topic} · v${data.version} · 已关联 ${data.members.filter((member) => member.pull_number).length}/${data.members.length} 仓${note ? ' · ' + note : ''}`;
+    const merged = data.members.filter((member) => member.merge?.state === 'merged').length;
+    const blocked = data.members.filter((member) => member.merge?.state === 'blocked').length;
+    const counts = mergeEnabled || merged || blocked ? ` · 已核验合并 ${merged}/${data.members.length} 仓，受阻 ${blocked} 仓` : '';
+    savedTopic.textContent = `联调单 ${data.topic} · v${data.version} · 已关联 ${data.members.filter((member) => member.pull_number).length}/${data.members.length} 仓${counts}${note ? ' · ' + note : ''}`;
     topic.value = data.topic;
     project.value = data.project_id;
   } catch {
     if (!query.signal.aborted) message.textContent = '暂时读不到保存的联调单。';
   }
+}
+
+function renderMerge(card, topicID, member, pull) {
+  card.append(element('p', `已关联 #${member.pull_number}`));
+  const status = member.merge;
+  const mergeReasons = {
+    pull_not_ready: 'PR 未就绪（可能是冲突、后台检查中或已关闭）',
+    branch_policy_unknown: '拿不到目标分支保护',
+    branch_policy_unsafe: '目标分支未满足保护和审批要求，或当前账号可直接推送',
+    approval_missing: '当前提交的正式批准不足，或仍有修改要求',
+    gitea_rejected_merge: 'Gitea 拒绝合并，请在原 PR 查看规则和检查项',
+  };
+  if (status?.state === 'merged') {
+    card.append(element('p', `已核验合并 · ${status.merge_sha}`));
+    return;
+  }
+  if (status?.state === 'blocked') {
+    card.dataset.merge = 'blocked';
+    card.append(element('p', `合并受阻：${mergeReasons[status.result_code] ?? '请检查原 PR'}`));
+  }
+  const pending = status?.state === 'unconfirmed';
+  if (pending) card.append(element('p', '合并结果待核对；不会自动重新提交。'));
+  if (!mergeEnabled) return;
+  const reconcile = pending || pull?.lifecycle === 'merged';
+  if (!reconcile && (pull?.lifecycle !== 'open' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pull.head_sha))) return;
+  const button = element('button', reconcile ? '核对合并结果' : '确认合并这一仓');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    if (mergeBusy || savedBatch?.id !== topicID) return;
+    if (!reconcile && !window.confirm(`确认合并 #${pull.number} 到 ${member.target_branch}？\n提交：${pull.head_sha}\n只操作这一仓，不会绕过 Gitea 检查。`)) return;
+    const current = savedBatch;
+    mergeBusy = true;
+    button.disabled = true;
+    message.textContent = reconcile ? '正在核对 Gitea…' : '正在提交合并请求…';
+    let note = '已刷新合并结果';
+    try {
+      const response = await fetch(`/bridge/api/topics/${encodeURIComponent(topicID)}/members/${member.id}/merge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reconcile ? { reconcile: true } : { confirm: true, expected_head: pull.head_sha }),
+      });
+      if (savedBatch !== current) return;
+      if (response.status === 401) return requireLogin();
+      if (response.status === 403) note = '当前账号不能合并这一仓';
+      else if (response.status === 409) note = '关联 PR 或提交已变化，请检查后重新确认';
+      else if (!response.ok) note = '未收到合并确认，先核对已保存的状态';
+    } catch {
+      note = '未收到合并确认，先核对已保存的状态';
+    } finally {
+      mergeBusy = false;
+      button.disabled = false;
+    }
+    if (savedBatch === current) await openSavedTopic(topicID, note);
+  });
+  card.append(button);
 }
 
 createPulls.addEventListener('click', async () => {
@@ -286,6 +349,7 @@ async function loadProjects() {
     account.textContent = `当前账号：${data.user}`;
     storeEnabled = data.saved_topics;
     writesEnabled = data.pull_creation;
+    mergeEnabled = data.merge_enabled;
     logout.hidden = false;
     const params = new URLSearchParams(location.search);
     const saved = storeEnabled && /^[A-Za-z0-9_-]{43}$/.test(params.get('topic_id') ?? '') ? params.get('topic_id') : null;

@@ -181,6 +181,92 @@ func TestGiteaLocalLab(t *testing.T) {
 	if repeatBatch.Members[2].PullNumber != batch.Members[2].PullNumber || repeatBatch.Members[2].ResultCode != "created" {
 		t.Fatal("a retry changed an already successful repository")
 	}
+	seedBranch("merged", "missing")
+	batch = postLabTopic(t, writer, batchURL, writerURL, "", confirmation, 200)
+	for _, name := range []string{"merged", "conflict", "no-match"} {
+		rule := map[string]any{
+			"rule_name": "main", "enable_push": false, "required_approvals": 1,
+			"enable_approvals_whitelist": true, "approvals_whitelist_username": []string{"labowner"},
+			"block_admin_merge_override": true,
+		}
+		if name == "no-match" {
+			rule["enable_status_check"], rule["status_check_contexts"] = true, []string{"fixture/required"}
+		}
+		api("POST", "/repos/labowner/"+name+"/branch_protections", rule, nil, 201)
+	}
+	api("POST", "/repos/labowner/no-match/contents/direct.txt", map[string]string{
+		"branch": "main", "message": "Synthetic protected write", "content": "dGVzdAo=",
+	}, nil, 403)
+	type labMergeTarget struct {
+		Number    int64
+		Head      struct{ SHA string }
+		Mergeable bool
+		Merged    bool
+		MergeSHA  string             `json:"merge_commit_sha"`
+		MergedBy  struct{ ID int64 } `json:"merged_by"`
+	}
+	readMergeTarget := func(repo Repository, member TopicMember, ready bool) labMergeTarget {
+		t.Helper()
+		endpoint := fmt.Sprintf("/repos/labowner/%s/pulls/%d", repo.Name, member.PullNumber)
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			var detail labMergeTarget
+			api("GET", endpoint, nil, &detail, 200)
+			if !ready || detail.Mergeable || time.Now().After(deadline) {
+				return detail
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	mergeURL := func(member TopicMember) string {
+		return fmt.Sprintf("%s/bridge/api/topics/%s/members/%d/merge", writerURL, batch.ID, member.ID)
+	}
+	confirmMerge := func(head string) string {
+		return fmt.Sprintf(`{"confirm":true,"expected_head":%q}`, head)
+	}
+	first := readMergeTarget(repos[0], batch.Members[0], true)
+	second := readMergeTarget(repos[2], batch.Members[2], true)
+	if !first.Mergeable || !second.Mergeable {
+		t.Fatal("Gitea did not finish checks for clean PRs")
+	}
+	postLabTopic(t, writer, mergeURL(batch.Members[2]), writerURL, "", confirmMerge(strings.Repeat("a", 40)), 409)
+	missingApproval := postLabTopic(t, writer, mergeURL(batch.Members[2]), writerURL, "", confirmMerge(second.Head.SHA), 200)
+	if missingApproval.Members[2].Merge == nil || missingApproval.Members[2].Merge.ResultCode != "approval_missing" {
+		var policy map[string]any
+		labAPI(t, base, reviewerToken, "GET", "/repos/labowner/no-match/branches/main", nil, &policy, 200)
+		delete(policy, "commit")
+		t.Fatalf("unexpected merge gate: %+v; target branch metadata: %+v", missingApproval.Members[2].Merge, policy)
+	}
+	for _, index := range []int{0, 2} {
+		api("POST", fmt.Sprintf("/repos/labowner/%s/pulls/%d/reviews", repos[index].Name, batch.Members[index].PullNumber),
+			map[string]string{"event": "APPROVED", "body": "Synthetic approval"}, nil, 200)
+	}
+	api("PUT", "/repos/labowner/no-match/collaborators/labreviewer", map[string]string{"permission": "read"}, nil, 204)
+	postLabTopic(t, writer, mergeURL(batch.Members[2]), writerURL, "", confirmMerge(second.Head.SHA), 403)
+	api("PUT", "/repos/labowner/no-match/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
+	postLabTopic(t, writer, mergeURL(batch.Members[2]), "https://untrusted.invalid", "", confirmMerge(second.Head.SHA), 403)
+	statusBlocked := postLabTopic(t, writer, mergeURL(batch.Members[2]), writerURL, "", confirmMerge(second.Head.SHA), 200)
+	if statusBlocked.Members[2].Merge == nil || statusBlocked.Members[2].Merge.ResultCode != "gitea_rejected_merge" ||
+		readMergeTarget(repos[2], batch.Members[2], false).Merged {
+		t.Fatalf("Gitea did not enforce the required status check: %+v", statusBlocked.Members[2].Merge)
+	}
+	api("POST", "/repos/labowner/no-match/statuses/"+second.Head.SHA, map[string]string{"state": "success", "context": "fixture/required"}, nil, 201)
+	postLabTopic(t, writer, mergeURL(batch.Members[0]), writerURL, "", confirmMerge(first.Head.SHA), 200)
+	conflictPull := readMergeTarget(repos[1], batch.Members[1], false)
+	postLabTopic(t, writer, mergeURL(batch.Members[1]), writerURL, "", confirmMerge(conflictPull.Head.SHA), 200)
+	mergedBatch := postLabTopic(t, writer, mergeURL(batch.Members[2]), writerURL, "", confirmMerge(second.Head.SHA), 200)
+	for _, index := range []int{0, 2} {
+		actual := readMergeTarget(repos[index], batch.Members[index], false)
+		evidence := mergedBatch.Members[index].Merge
+		if !actual.Merged || evidence == nil || evidence.State != "merged" || evidence.MergeSHA != actual.MergeSHA ||
+			evidence.MergedBy != actual.MergedBy.ID || evidence.MergedBy != evidence.RequestedBy || evidence.MergedAt == nil {
+			t.Fatalf("merged evidence for repo %s did not match Gitea: %+v", repos[index].Name, evidence)
+		}
+	}
+	remaining := mergedBatch.Members[1].Merge
+	if remaining == nil || remaining.State != "blocked" || remaining.ResultCode != "pull_not_ready" || readMergeTarget(repos[1], batch.Members[1], false).Merged {
+		t.Fatalf("conflicting repository did not stay blocked: %+v", remaining)
+	}
 	api("DELETE", "/repos/labowner/conflict/collaborators/labreader", nil, nil, 204)
 	results = lookup(3)
 	if len(results) != 2 || results[1].Repository.Name != "no-match" {
@@ -227,7 +313,7 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	}, &creds, 201)
 	handler, err := NewServer(ServerConfig{PublicBaseURL: bridgeURL + "/bridge/", GiteaPublicURL: giteaURL, GiteaAPIURL: giteaURL,
 		ClientID: creds.ID, ClientSecret: creds.Secret, AllowLoopbackHTTP: true, PageSize: 1, MaxPages: 3,
-		TopicStore: store, EnablePullCreation: true,
+		TopicStore: store, EnablePullCreation: true, EnableMerge: true,
 		Projects: []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
 	})
 	if err != nil {

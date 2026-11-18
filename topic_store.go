@@ -28,15 +28,16 @@ type TopicChangeSet struct {
 }
 
 type TopicMember struct {
-	ID           int64      `json:"id"`
-	RepositoryID int64      `json:"repository_id"`
-	SourceBranch string     `json:"source_branch,omitempty"`
-	TargetBranch string     `json:"target_branch,omitempty"`
-	State        string     `json:"state"`
-	PullNumber   int64      `json:"pull_number,omitempty"`
-	ResultCode   string     `json:"result_code,omitempty"`
-	ActorID      int64      `json:"actor_id,omitempty"`
-	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
+	ID           int64       `json:"id"`
+	RepositoryID int64       `json:"repository_id"`
+	SourceBranch string      `json:"source_branch,omitempty"`
+	TargetBranch string      `json:"target_branch,omitempty"`
+	State        string      `json:"state"`
+	PullNumber   int64       `json:"pull_number,omitempty"`
+	ResultCode   string      `json:"result_code,omitempty"`
+	ActorID      int64       `json:"actor_id,omitempty"`
+	UpdatedAt    *time.Time  `json:"updated_at,omitempty"`
+	Merge        *MergeState `json:"merge,omitempty"`
 }
 
 func OpenTopicStore(ctx context.Context, path string) (*TopicStore, error) {
@@ -113,7 +114,7 @@ PRAGMA user_version=1;`); err != nil {
 			return err
 		}
 		fallthrough
-	case 1, 2:
+	case 1, 2, 3:
 		if version != 0 && applicationID != bridgeApplicationID {
 			return errors.New("database is not owned by Bridge")
 		}
@@ -127,6 +128,26 @@ ALTER TABLE topic_members ADD COLUMN result_code TEXT NOT NULL DEFAULT '';
 ALTER TABLE topic_members ADD COLUMN actor_id INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE topic_members ADD COLUMN updated_at_ns INTEGER NOT NULL DEFAULT 0;
 PRAGMA user_version=2;`); err != nil {
+			return err
+		}
+	}
+	if version < 3 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE pull_merges (
+    repo_id INTEGER NOT NULL,
+    pull_number INTEGER NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    state TEXT NOT NULL CHECK (state IN ('unconfirmed', 'blocked', 'merged')),
+    result_code TEXT NOT NULL,
+    expected_head TEXT NOT NULL,
+    requested_by INTEGER NOT NULL,
+    merge_sha TEXT NOT NULL,
+    merged_by INTEGER NOT NULL,
+    merged_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, pull_number)
+) STRICT;
+CREATE INDEX topic_members_pull ON topic_members(repo_id, pull_number);
+PRAGMA user_version=3;`); err != nil {
 			return err
 		}
 	}
@@ -160,16 +181,33 @@ func readTopic(ctx context.Context, reader topicReader, filter string, args ...a
 		return TopicChangeSet{}, "", err
 	}
 	topic.CreatedAt = time.Unix(0, nanos).UTC()
-	rows, err := reader.QueryContext(ctx, `SELECT id, repo_id, source_branch, target_branch, state, pull_number, result_code, actor_id, updated_at_ns FROM topic_members WHERE topic_id = ? ORDER BY id`, topic.ID)
+	rows, err := reader.QueryContext(ctx, `
+SELECT members.id, members.repo_id, members.source_branch, members.target_branch, members.state,
+    members.pull_number, members.result_code, members.actor_id, members.updated_at_ns,
+    COALESCE(merge.revision, 0), COALESCE(merge.state, ''), COALESCE(merge.result_code, ''),
+    COALESCE(merge.expected_head, ''), COALESCE(merge.requested_by, 0), COALESCE(merge.merge_sha, ''),
+    COALESCE(merge.merged_by, 0), COALESCE(merge.merged_at_ns, 0)
+FROM topic_members AS members
+LEFT JOIN pull_merges AS merge ON merge.repo_id = members.repo_id AND merge.pull_number = members.pull_number
+WHERE members.topic_id = ? ORDER BY members.id`, topic.ID)
 	if err != nil {
 		return TopicChangeSet{}, "", err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var member TopicMember
-		var updated int64
-		if err := rows.Scan(&member.ID, &member.RepositoryID, &member.SourceBranch, &member.TargetBranch, &member.State, &member.PullNumber, &member.ResultCode, &member.ActorID, &updated); err != nil {
+		var merge MergeState
+		var updated, mergedAt int64
+		if err := rows.Scan(&member.ID, &member.RepositoryID, &member.SourceBranch, &member.TargetBranch, &member.State, &member.PullNumber, &member.ResultCode, &member.ActorID, &updated,
+			&merge.revision, &merge.State, &merge.ResultCode, &merge.ExpectedHead, &merge.RequestedBy, &merge.MergeSHA, &merge.MergedBy, &mergedAt); err != nil {
 			return TopicChangeSet{}, "", err
+		}
+		if merge.revision > 0 {
+			if mergedAt != 0 {
+				value := time.Unix(0, mergedAt).UTC()
+				merge.MergedAt = &value
+			}
+			member.Merge = &merge
 		}
 		if updated != 0 {
 			value := time.Unix(0, updated).UTC()

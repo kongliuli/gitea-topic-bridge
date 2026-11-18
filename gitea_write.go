@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -103,22 +104,11 @@ func (client *Gitea) createMemberPull(ctx context.Context, repo Repository, topi
 		return 0, 0, err
 	}
 	marker := memberMarker(topic.ID, member)
-	payload, err := json.Marshal(map[string]any{
+	response, err := client.postJSON(ctx, endpoint.JoinPath("pulls"), map[string]any{
 		"title": "[Topic: " + topic.Topic + "] " + member.SourceBranch + " → " + member.TargetBranch,
 		"body":  marker, "base": member.TargetBranch, "head": member.SourceBranch,
 		"allow_maintainer_edit": false,
 	})
-	if err != nil {
-		return 0, 0, err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.JoinPath("pulls").String(), bytes.NewReader(payload))
-	if err != nil {
-		return 0, 0, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Authorization", "Bearer "+client.token)
-	response, err := client.http.Do(request)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -140,4 +130,19 @@ func (client *Gitea) createMemberPull(ctx context.Context, repo Repository, topi
 		return 0, response.StatusCode, errors.New("Gitea did not confirm creation for the expected branches and user")
 	}
 	return row.Number, response.StatusCode, nil
+}
+
+func (client *Gitea) postJSON(ctx context.Context, endpoint *url.URL, value any) (*http.Response, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer "+client.token)
+	return client.http.Do(request)
 }
