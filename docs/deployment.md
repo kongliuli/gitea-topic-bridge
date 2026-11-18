@@ -77,6 +77,26 @@ Start-Service -Name GiteaTopicBridge
 
 `-LogFile` 使用独立日志目录中的绝对路径。程序启动时会拒绝把配置、密钥、存证 CA、数据库和 SQLite 附属文件当成日志，也会拒绝在收件与回执快照目录内写日志。遇到路径校验失败时先检查前台启动输出或服务启动状态，再修正路径后重试。
 
+### 在目标主机检查开机自启
+
+用管理员 PowerShell 7.4 或以上版本运行[主机探针](../examples/Test-BridgeWindowsServices.ps1)。将下面的服务名、专用账号和端口换成实际配置。启用 Webhook 时给 Bridge 的 `Ports` 加上内部端口 3002。用 Tailscale Serve 时按实际配置填写 Caddy 回环端口，并为 Caddy 加上 `LoopbackOnly=$true`。独立存证按它所在的主机单独检查，使用该机的服务名和端口。
+
+```powershell
+$services = @(
+    @{ Name='Gitea'; Account='.\GiteaSvc'; Ports=3000; LoopbackOnly=$true }
+    @{ Name='GiteaTopicBridge'; Account='.\BridgeSvc'; Ports=3001; LoopbackOnly=$true; DelayedAutoStart=$true }
+    @{ Name='Caddy'; Account='.\CaddySvc'; Ports=443 }
+)
+
+# 在计划重启前，保存同一台机器的基线
+.\examples\Test-BridgeWindowsServices.ps1 -Services $services > services-before.json
+
+# 整机重启后，在同一台机器重新定义上面的 $services，待服务自行启动后采集
+.\examples\Test-BridgeWindowsServices.ps1 -Services $services -BeforeRestart .\services-before.json > services-after.json
+```
+
+报告记录开机时间、服务状态、自动启动设置、注册账号和运行进程的账号，以及该进程实际监听的 TCP 地址与端口。带基线运行时，当前开机时间必须比基线更新。任何一项未通过时，命令以非零状态退出。验收期间让 SCM 自行启动各服务，再从目标网络完成[客户端探针](#从客户端检查入口)、OAuth 登录和 Git 克隆。
+
 ### 内部 Webhook
 
 启用时，在已有 Bridge 数据库配置下添加 `-hook-listen 127.0.0.1:3002`。启动环境提供两个独立密钥：`BRIDGE_WEBHOOK_SECRET`（至少 32 字节的随机共享密钥）及 `BRIDGE_WEBHOOK_READER_TOKEN`（专用非管理员账号，只授予白名单仓的读取权限，令牌只给 `read:repository`）。两者都不得进入 Git、日志或浏览器。内部回调必须直连 `http://127.0.0.1:3002/internal/hooks/gitea`；不监听公网，不交给 Caddy 或 Tailscale 转发。

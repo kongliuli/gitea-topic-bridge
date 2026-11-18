@@ -148,6 +148,8 @@ Windows 构建和测试验证 SCM 处理器的启动、询问、停止、关机�
 
 Windows Server 2025 VM 已实测全部停止再启动 Gitea、Caddy、Bridge 和独立存证服务。四个监听端口在停止后释放，启动后四个进程的 PID 都已更换，Caddy 根 CA 保持一致。普通协作者重新通过 HTTPS 登录，读到原联调单及版本、同一试点 PR 和 Git 分支提交。重新下载的签名回执和存证凭证与停机前逐字节一致，仍可用原公钥验签。直接向独立存证服务重放原请求也返回 `200` 和同一份凭证，确认独立账本保留了原记录。[四服务停启验收记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44388149328)
 
+在同类 VM 实测[主机探针](deployment.md#在目标主机检查开机自启)。四个服务的自动启动设置、注册账号、实际进程账号和监听端口均通过。仍处于同一次开机、填写错误账号、填写其他进程的端口、将 Caddy 改成手动启动时，报告记录各自的失败项并返回非零状态。[主机探针验收记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44393425861)
+
 可在 GitHub Actions 手动运行「Windows service lab」复验。目标主机的整机重启、实际账户和业务路径 ACL、远程网络与项目试接仍须现场验收。
 
 ## 已验证：Bridge 与独立账本空目录恢复
