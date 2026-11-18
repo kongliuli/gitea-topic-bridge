@@ -50,7 +50,7 @@ type Server struct {
 
 var projectID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
-//go:embed web/index.html web/app.js web/style.css
+//go:embed web/index.html web/app.js web/style.css web/receipts.html web/receipts.js
 var site embed.FS
 
 func NewServer(config ServerConfig) (http.Handler, error) {
@@ -114,7 +114,10 @@ func NewServer(config ServerConfig) (http.Handler, error) {
 		mux.HandleFunc("POST /bridge/api/topics/{id}/members/{member}/revert-pr", server.withUser(server.revertTopicMember))
 	}
 	if server.receipts != nil {
+		mux.HandleFunc("GET /bridge/receipts/{$}", serveAsset("receipts.html", "text/html; charset=utf-8"))
+		mux.HandleFunc("GET /bridge/receipts.js", serveAsset("receipts.js", "text/javascript; charset=utf-8"))
 		mux.HandleFunc("POST /bridge/api/receipts", server.withUser(server.createReceipt))
+		mux.HandleFunc("GET /bridge/api/receipts", server.withUser(server.listReceipts))
 		mux.HandleFunc("GET /bridge/api/receipts/{id}", server.withUser(server.getReceipt))
 		mux.HandleFunc("GET /bridge/api/receipt-key", server.receiptKey)
 	}
@@ -217,7 +220,10 @@ func (server *Server) listProjects(writer http.ResponseWriter, request *http.Req
 		PullCreation  bool             `json:"pull_creation"`
 		MergeEnabled  bool             `json:"merge_enabled"`
 		RevertEnabled bool             `json:"revert_enabled"`
-	}{user.Login, projects, server.config.TopicStore != nil, server.config.EnablePullCreation, server.config.EnableMerge, server.config.EnableRevert})
+		ReceiptCenter bool             `json:"receipt_center"`
+		ReceiptIssuer bool             `json:"receipt_issuer"`
+	}{user.Login, projects, server.config.TopicStore != nil, server.config.EnablePullCreation, server.config.EnableMerge, server.config.EnableRevert,
+		server.receipts != nil, server.receipts != nil && server.receipts.issuers[user.ID]})
 }
 
 func (server *Server) lookupTopic(writer http.ResponseWriter, request *http.Request, client *Gitea, _ GiteaUser) {

@@ -111,6 +111,28 @@ func (store *TopicStore) receiptByID(ctx context.Context, id string) ([]byte, er
 	return []byte(data), err
 }
 
+func (store *TopicStore) receiptIDs(ctx context.Context, topicID, before string) ([]string, string, error) {
+	rows, err := store.db.QueryContext(ctx, `
+SELECT id FROM delivery_receipts WHERE topic_id=? AND (?='' OR rowid<(SELECT rowid FROM delivery_receipts WHERE topic_id=? AND id=?))
+ORDER BY rowid DESC LIMIT 13`, topicID, before, topicID, before)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, "", err
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) > 12 {
+		return ids[:12], ids[11], rows.Err()
+	}
+	return ids, "", rows.Err()
+}
+
 func (store *TopicStore) receiptByRequest(ctx context.Context, who int64, key string) ([]byte, string, error) {
 	var data, hash string
 	err := store.db.QueryRowContext(ctx, `SELECT envelope, request_hash FROM delivery_receipts WHERE issuer_id=? AND request_key=?`, who, key).Scan(&data, &hash)

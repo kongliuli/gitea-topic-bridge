@@ -70,6 +70,7 @@ func (store *expiringStore[Value]) get(key string, consume bool) (Value, bool) {
 type loginAttempt struct {
 	verifier    string
 	returnQuery string
+	returnPath  string
 }
 
 func randomID() (string, error) {
@@ -101,7 +102,16 @@ func (server *Server) startLogin(writer http.ResponseWriter, request *http.Reque
 	verifier, verifierErr := randomID()
 	returnQuery := url.Values{}
 	query := request.URL.Query()
-	if topicIDPattern.MatchString(query.Get("topic_id")) {
+	returnPath := "/bridge/"
+	if query.Get("page") == "receipts" && server.receipts != nil {
+		returnPath = "/bridge/receipts/"
+		if topicIDPattern.MatchString(query.Get("topic_id")) {
+			returnQuery.Set("topic_id", query.Get("topic_id"))
+		}
+		if topicIDPattern.MatchString(query.Get("id")) {
+			returnQuery.Set("id", query.Get("id"))
+		}
+	} else if topicIDPattern.MatchString(query.Get("topic_id")) {
 		returnQuery.Set("topic_id", query.Get("topic_id"))
 	} else if projectID.MatchString(query.Get("project_id")) && topicPattern.MatchString(query.Get("topic")) {
 		returnQuery.Set("project_id", query.Get("project_id"))
@@ -110,7 +120,7 @@ func (server *Server) startLogin(writer http.ResponseWriter, request *http.Reque
 	if previous := cookieValue(request, stateCookie); previous != "" {
 		server.pending.get(previous, true)
 	}
-	if stateErr != nil || verifierErr != nil || !server.pending.put(state, loginAttempt{verifier, returnQuery.Encode()}, loginLifetime) {
+	if stateErr != nil || verifierErr != nil || !server.pending.put(state, loginAttempt{verifier, returnQuery.Encode(), returnPath}, loginLifetime) {
 		http.Error(writer, "暂时无法开始登录，请稍后重试。", http.StatusServiceUnavailable)
 		return
 	}
@@ -188,7 +198,7 @@ func (server *Server) finishLogin(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	server.setCookie(writer, sessionCookie, session, int(lifetime.Seconds()))
-	location := "/bridge/"
+	location := attempt.returnPath
 	if attempt.returnQuery != "" {
 		location += "?" + attempt.returnQuery
 	}

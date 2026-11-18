@@ -7,6 +7,7 @@ const results = document.querySelector('#results');
 const save = document.querySelector('#save-topic');
 const savedTopic = document.querySelector('#saved-topic');
 const createPulls = document.querySelector('#create-pulls');
+const receiptCenter = document.querySelector('#receipt-center');
 const submit = form.querySelector('button');
 const project = form.elements.namedItem('project_id');
 const topic = form.elements.namedItem('topic');
@@ -34,6 +35,7 @@ function requireLogin() {
   login.href = `/bridge/auth/login${location.search}`;
   login.hidden = false;
   logout.hidden = true;
+  receiptCenter.hidden = true;
   form.hidden = true;
   account.textContent = '';
   clearSavedTopic();
@@ -134,6 +136,7 @@ async function lookup() {
 }
 
 function clearSavedTopic() {
+  receiptCenter.href = '/bridge/receipts/';
   draft = undefined;
   savedBatch = undefined;
   save.hidden = true;
@@ -227,6 +230,7 @@ async function openSavedTopic(id, note = '') {
       }
     });
     savedBatch = { id, selected };
+    receiptCenter.href = `/bridge/receipts/?${new URLSearchParams({ topic_id: id })}`;
     createPulls.disabled = false;
     createPulls.hidden = !selected.length;
     savedTopic.hidden = false;
@@ -403,6 +407,7 @@ async function loadProjects() {
     if (!response.ok) throw new Error('project list failed');
     const data = await response.json();
     account.textContent = `当前账号：${data.user}`;
+    receiptCenter.hidden = !data.receipt_center;
     storeEnabled = data.saved_topics;
     writesEnabled = data.pull_creation;
     mergeEnabled = data.merge_enabled;

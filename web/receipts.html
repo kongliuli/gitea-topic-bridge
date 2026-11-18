@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>交付回执 · Gitea Topic Bridge</title>
+  <link rel="stylesheet" href="/bridge/style.css">
+  <script type="module" src="/bridge/receipts.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="label">GITEA TOPIC BRIDGE</p>
+      <h1>交付回执</h1>
+      <p>查阅签名快照、制品摘要和独立存证凭证。</p>
+    </header>
+    <nav class="account" aria-label="功能导航"><a id="dashboard" href="/bridge/">多仓联调</a> · <a href="/bridge/api/receipt-key">签发公钥</a> · <a id="login" href="/bridge/auth/login?page=receipts" hidden>用 Gitea 登录</a></nav>
+    <form id="find">
+      <label>回执 ID <input name="id" required maxlength="43" pattern="[A-Za-z0-9_\-]{43}"></label>
+      <button type="submit">打开</button>
+    </form>
+    <p id="message" role="status"></p>
+    <section id="receipt" aria-label="回执详情"></section>
+    <section id="history" aria-label="历史版本"></section>
+    <form id="issue" hidden>
+      <fieldset>
+        <legend id="issue-title">签发回执</legend>
+        <p>默认引用已关联的合并 PR。只填写需要覆盖的发布证据与需要复制的制品。</p>
+        <div id="members"></div>
+        <button type="submit">确认签发</button>
+      </fieldset>
+    </form>
+    <noscript>回执中心需要启用 JavaScript。</noscript>
+  </main>
+</body>
+</html>

@@ -119,6 +119,19 @@ func verifyReceiptLab(t *testing.T, gitea, ownerToken string, browser *http.Clie
 	if second.document.Version != 2 || second.document.PreviousDigest != first.envelope.Digest || second.document.PreviousID != first.document.ID {
 		t.Fatal("correction did not link to the original digest and ID")
 	}
+	center := loadLabPage(t, browser, bridgeURL+"/bridge/receipts/", nil, 200)
+	if !strings.Contains(center, `src="/bridge/receipts.js"`) {
+		t.Fatal("receipt center is missing its embedded script")
+	}
+	historyURL := bridgeURL + "/bridge/api/receipts?topic_id=" + topicID
+	var listing struct {
+		Versions []receiptVersion
+		CanIssue bool `json:"can_issue"`
+	}
+	if err := json.Unmarshal([]byte(loadLabPage(t, browser, historyURL, nil, 200)), &listing); err != nil || !listing.CanIssue ||
+		len(listing.Versions) != 2 || listing.Versions[0].ID != second.document.ID || listing.Versions[1].ID != first.document.ID {
+		t.Fatalf("unexpected receipt history: %+v %v", listing, err)
+	}
 	digest := sha256.Sum256([]byte("fixture delivery\n"))
 	doc := first.document
 	if len(doc.Artifacts) != 1 || doc.Artifacts[0].SHA256 != hex.EncodeToString(digest[:]) || len(doc.Members) != 3 ||
@@ -170,6 +183,7 @@ func verifyReceiptLab(t *testing.T, gitea, ownerToken string, browser *http.Clie
 	loadLabPage(t, browser, url+"?format=json", nil, 404)
 	loadLabPage(t, browser, url+"?format=markdown", nil, 404)
 	loadLabPage(t, browser, url+"?format=proof", nil, 404)
+	loadLabPage(t, browser, historyURL, nil, 404)
 	issue("first-receipt", "", 404)
 	labAPI(t, gitea, ownerToken, "PUT", collaborator, map[string]string{"permission": "write"}, nil, 204)
 }

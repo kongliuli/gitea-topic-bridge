@@ -28,9 +28,9 @@ Bridge 用 Gitea OAuth2 授权码、PKCE 与 state。固定回调 `/bridge/auth/
 
 在对应仓配置 Gitea 类型的 JSON Webhook，选择 PR 和 Release 事件，填写相同的签名密钥。在 Gitea 的 `[security]` 出站允许列表中增加准确的 `127.0.0.1:3002`，不要为了回调打开全部内网地址。查看 Gitea 投递日志确认收到 `202`；这是持久入队，不是回执签发。遇到 `503` 须从投递历史重试，并检查 Bridge 日志、磁盘及只读账号权限。
 
-### 交付回执 API
+### 交付回执中心与 API
 
-默认关闭。在配置中添加 `"receipts":{"artifact_root":"C:/BridgeInbox","snapshot_root":"C:/BridgeSnapshots","issuers":[42]}`，并配置 Bridge 数据库。用实际 Gitea 账号数字 ID 替换 `42`，仅授权负责交付的用户。两个目录都必须已存在，且位于本机磁盘、互不包含；Bridge 账号对收件目录只读，对快照目录独占写入；不要让其他用户写入或重映射快照目录。上传的制品放在收件根目录下的 `<仓库数字ID>/<相对路径>`，先停止写入再签发。
+默认关闭。在配置中添加 `"receipts":{"artifact_root":"C:/BridgeInbox","snapshot_root":"C:/BridgeSnapshots","issuers":[42]}`，并配置 Bridge 数据库。用实际 Gitea 账号数字 ID 替换 `42`，仅授权负责交付的用户。两个目录都必须已存在，且位于本机磁盘、互不包含；Bridge 账号对收件目录只读，对快照目录独占写入；不要让其他用户写入或重映射快照目录。上传的制品放在收件根目录下的 `<仓库数字ID>/<相对路径>`，先停止写入再签发。启用后，可从 Bridge 联调单打开「交付回执」，或访问 `/bridge/receipts/` 输入回执 ID。
 
 从安全启动环境设置 `BRIDGE_RECEIPT_SIGNING_SEED` 为 32 字节密码学随机种子的标准 Base64。种子不是密码，必须保密并做离线备份；当前服务只识别一个签发公钥，不支持在线轮换。用 `/bridge/api/receipt-key` 查看公钥与指纹，经独立可信渠道分发，不要用回执自带数据建立信任。离线验签：`.\bridge.exe -verify-receipt C:/path/receipt.json -trusted-receipt-key <可信公钥Base64>`。该命令验 JSON，不验文件；另对快照目录 `<回执ID>/<slot>.blob` 计算 SHA-256，与签名快照的对应项比对。
 
