@@ -9,9 +9,15 @@ import (
 
 var topicPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9-]{0,63}$`)
 
+var (
+	ErrNotVisible   = errors.New("repository is not visible")
+	ErrUnauthorized = errors.New("upstream authorization expired or invalid")
+)
+
 type Repository struct {
-	ID   int64
-	Name string
+	ID    int64
+	Name  string
+	Owner string `json:"owner"`
 }
 
 type PullRequest struct {
@@ -20,6 +26,7 @@ type PullRequest struct {
 	Body      string `json:"-"`
 	Lifecycle string
 	HeadSHA   string
+	URL       string
 }
 
 type Page struct {
@@ -55,6 +62,9 @@ func Lookup(ctx context.Context, source Source, repositories []Repository, topic
 		}
 		visible, err := source.CanReadPullRequests(ctx, repo)
 		if err != nil {
+			if errors.Is(err, ErrUnauthorized) {
+				return nil, ErrUnauthorized
+			}
 			return nil, errors.New("cannot verify repository permissions")
 		}
 		if !visible {
@@ -65,6 +75,13 @@ func Lookup(ctx context.Context, source Source, repositories []Repository, topic
 		for pageNumber := 1; pageNumber <= maxPages && ctx.Err() == nil; pageNumber++ {
 			page, err := source.PullRequests(ctx, repo, pageNumber)
 			if err != nil {
+				if errors.Is(err, ErrUnauthorized) {
+					return nil, ErrUnauthorized
+				}
+				if errors.Is(err, ErrNotVisible) {
+					result.Status = "hidden"
+					break
+				}
 				if ctx.Err() == nil {
 					result.Status = "failed"
 				}
@@ -82,7 +99,9 @@ func Lookup(ctx context.Context, source Source, repositories []Repository, topic
 				break
 			}
 		}
-		results = append(results, result)
+		if result.Status != "hidden" {
+			results = append(results, result)
+		}
 	}
 	return results, nil
 }
