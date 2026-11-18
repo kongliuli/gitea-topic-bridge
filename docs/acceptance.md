@@ -175,6 +175,12 @@ $env:BRIDGE_TEST_GITEA_RESTORE_ASSETS = '1' # 同时验证 LFS 和附件，需�
 go test -v -timeout 3m -run '^TestGiteaColdRestoreLab$' -count=1 ./...
 ```
 
+## 已验证：四个 Windows 服务从备份恢复
+
+在一次性 Windows Server 2025 VM 上，停止 Gitea、Caddy、Bridge 和独立存证，等原进程退出后，把数据复制到受限备份目录，再恢复到新的空目录。新的 Gitea、Bridge 和存证服务使用不同的回环端口，Caddy 保留原实验 HTTPS 地址和根 CA，以复验备份中的 OAuth 配置和客户端信任。源实例的三份 SQLite 数据库和 Caddy 根 CA 的 SHA-256 在演练前后一致。
+
+启动恢复服务前，离线核验通过一张联调单、一份签名回执、一份制品快照和一份独立存证凭证。启动后，用原普通账号登录，读到同一联调单、Git 分支和试点 PR，重新下载的回执和凭证逐字节一致。主干保护仍要求至少一人批准，普通开发者通过恢复后的 HTTPS 网关推送获准的新分支。Bridge 账号能读取恢复的收件制品，无法修改制品或读取 Gitea 数据库与存证账本。[联合恢复验收记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44390713885)
+
 ## 已验证：合成旧仓试点导入
 
 从合成的旧裸仓克隆到临时目录，再将两个分支和一个带注解的标签推到新的空私有 Gitea 仓。逐项核对对象 ID，确认旧裸仓引用保持原样且通过 `git fsck`。配置新仓主干保护后创建一条试点 PR，普通只读账号通过 Bridge 读到与 Gitea 一致的 PR 编号和 head SHA。测试日志记录新仓 ID 和试点 PR；真实试点和按批切换待现场执行。
