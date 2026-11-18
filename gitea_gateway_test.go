@@ -2,9 +2,13 @@ package bridge
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -46,7 +50,7 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 	public := "https://" + gatewayAddr
 	internal, command := startLocalGiteaForPublicURL(t, gitea, "", public)
 	admin, _ := createLabUser(t, command, "labowner", "all", "--admin")
-	_, password := createLabUser(t, command, "labreader", "read:repository,read:user")
+	reader, password := createLabUser(t, command, "labreader", "read:repository,read:user")
 	var fixture struct {
 		ID       int64
 		CloneURL string `json:"clone_url"`
@@ -55,6 +59,8 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 		"name": "fixture", "private": true, "auto_init": true, "default_branch": "main",
 	}, &fixture, 201)
 	labAPI(t, internal, admin, "PUT", "/repos/labowner/fixture/collaborators/labreader", map[string]string{"permission": "read"}, nil, 204)
+	var issuer struct{ ID int64 }
+	labAPI(t, internal, reader, "GET", "/user", nil, &issuer, 200)
 	var creds struct {
 		ID     string `json:"client_id"`
 		Secret string `json:"client_secret"`
@@ -63,9 +69,29 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 		"name": "Gateway Lab", "confidential_client": true, "redirect_uris": []string{public + "/bridge/auth/callback"},
 	}, &creds, 201)
 	project := Project{ID: "lab", Name: "Gateway test", Repositories: []Repository{{ID: fixture.ID, Owner: "labowner", Name: "fixture"}}}
+	store, err := OpenTopicStore(context.Background(), filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	artifactRoot := t.TempDir()
+	repoDir := filepath.Join(artifactRoot, fmt.Sprint(fixture.ID))
+	if err := os.Mkdir(repoDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	artifact := []byte("local HTTPS receipt fixture\n")
+	if err := os.WriteFile(filepath.Join(repoDir, "artifact.txt"), artifact, 0600); err != nil {
+		t.Fatal(err)
+	}
+	key, signer, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	bridge, err := NewServer(ServerConfig{
 		PublicBaseURL: public + "/bridge/", GiteaPublicURL: public, GiteaAPIURL: internal,
 		ClientID: creds.ID, ClientSecret: creds.Secret, PageSize: 1, MaxPages: 2, Projects: []Project{project},
+		TopicStore: store, Receipts: &ReceiptConfig{ArtifactRoot: artifactRoot, SnapshotRoot: t.TempDir(), Issuers: []int64{issuer.ID},
+			SigningSeed: base64.StdEncoding.EncodeToString(signer.Seed())},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +100,7 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 	t.Cleanup(app.Close)
 	ca, browser := startLabCaddy(t, caddy, gatewayAddr, localAddr, internal, app.Listener.Addr().String())
 	home := loadLabPage(t, browser, public+"/", nil, 200)
-	if !strings.Contains(home, `href="/bridge/">多仓联调</a>`) {
+	if !strings.Contains(home, `href="/bridge/">多仓联调</a>`) || !strings.Contains(home, `href="/bridge/receipts/">交付回执</a>`) {
 		t.Fatal("Gitea did not render the Bridge navigation through the gateway")
 	}
 	if body := loadLabPage(t, browser, public+"/internal/hooks/gitea", nil, 404); body != "" {
@@ -82,12 +108,13 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 	}
 	loadLabPage(t, browser, public+"/bridge/api/projects", nil, 401)
 	var secureSession bool
+	returnPath, returnQuery := "/bridge/", "project_id=lab&topic=CAD-01"
 	browser.CheckRedirect = func(next *http.Request, via []*http.Request) error {
 		if next.URL.Scheme+"://"+next.URL.Host != public || len(via) > 12 {
 			return fmt.Errorf("unexpected redirect away from the canonical gateway or too many redirects")
 		}
 		if next.Response.Request.URL.Path == "/bridge/auth/callback" {
-			if next.URL.Path != "/bridge/" || next.URL.Query().Get("project_id") != "lab" || next.URL.Query().Get("topic") != "CAD-01" {
+			if next.URL.Path != returnPath || next.URL.RawQuery != returnQuery {
 				return fmt.Errorf("OAuth did not restore the original Bridge page")
 			}
 			for _, cookie := range next.Response.Cookies() {
@@ -121,6 +148,56 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 	if err != nil {
 		t.Fatalf("Git HTTPS clone through the trusted gateway failed: %v\n%s", err, gitOutput)
 	}
+	if center := loadLabPage(t, browser, public+"/bridge/receipts/", nil, 200); !strings.Contains(center, `src="/bridge/receipts.js"`) {
+		t.Fatal("Gitea menu did not resolve to the Bridge receipt center")
+	}
+	topic := postLabTopic(t, browser, public+"/bridge/api/topics", public, "tls-topic", `{"project_id":"lab","topic":"CAD-HTTPS"}`, 201)
+	path := issueTLSLabReceipt(t, browser, public, topic.ID, fixture.ID, key, fmt.Sprintf("%x", sha256.Sum256(artifact)))
+	receiptID := strings.TrimPrefix(path, "/bridge/api/receipts/")
+	returnPath, returnQuery = "/bridge/receipts/", "id="+receiptID+"&topic_id="+topic.ID
+	secureSession = false
+	browser.Jar, err = cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadLabPage(t, browser, public+path, nil, 401)
+	authorizeLabPage(t, browser, public, public+"/bridge/auth/login?page=receipts&"+returnQuery, "/bridge/receipts.js", "labreader", password)
+	if !secureSession {
+		t.Fatal("receipt deep link did not reauthorize with a secure cookie")
+	}
+	signed := loadLabPage(t, browser, public+path+"?format=json", nil, 200)
+	if VerifyReceipt([]byte(signed), base64.StdEncoding.EncodeToString(key)) != nil {
+		t.Fatal("signed JSON download failed verification after OAuth")
+	}
+	if markdown := loadLabPage(t, browser, public+path+"?format=markdown", nil, 200); !strings.Contains(markdown, "CAD-HTTPS") {
+		t.Fatal("authorized Markdown download does not describe the original topic")
+	}
+}
+
+func issueTLSLabReceipt(t *testing.T, browser *http.Client, public, topic string, repository int64, key ed25519.PublicKey, digest string) string {
+	t.Helper()
+	body := fmt.Sprintf(`{"topic_id":%q,"artifacts":[{"repository_id":%d,"path":"artifact.txt"}]}`, topic, repository)
+	request, err := http.NewRequest(http.MethodPost, public+"/bridge/api/receipts", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", public)
+	request.Header.Set("Idempotency-Key", "tls-receipt")
+	response, err := browser.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil || response.StatusCode != http.StatusCreated {
+		t.Fatalf("HTTPS receipt issue failed: %d %s", response.StatusCode, raw)
+	}
+	_, snapshot, err := readVerifiedReceipt(raw, key)
+	if err != nil || snapshot.TopicID != topic || len(snapshot.Artifacts) != 1 || snapshot.Artifacts[0].SHA256 != digest {
+		t.Fatalf("HTTPS signed receipt did not bind the fixture bytes: %v", err)
+	}
+	return "/bridge/api/receipts/" + snapshot.ID
 }
 
 func startLabCaddy(t *testing.T, binary, gateway, dialAddress, gitea, bridge string) (string, *http.Client) {

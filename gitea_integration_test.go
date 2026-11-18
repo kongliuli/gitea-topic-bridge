@@ -541,12 +541,20 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 
 func authorizeLabBrowser(t *testing.T, browser *http.Client, giteaURL, bridgeURL, username, password string) {
 	t.Helper()
+	authorizeLabPage(t, browser, giteaURL, bridgeURL+"/bridge/auth/login?topic=CAD-01&project_id=lab", "/bridge/app.js", username, password)
+}
+
+func authorizeLabPage(t *testing.T, browser *http.Client, giteaURL, bridgeLogin, asset, username, password string) {
+	t.Helper()
 	loginURL := giteaURL + "/user/login"
 	page := loadLabPage(t, browser, loginURL, nil, 200)
 	loginForm := url.Values{"user_name": {username}, "password": {password}}
 	addLabCSRF(page, loginForm)
 	loadLabPage(t, browser, loginURL, loginForm, 200)
-	consent := loadLabPage(t, browser, bridgeURL+"/bridge/auth/login?topic=CAD-01&project_id=lab", nil, 200)
+	consent := loadLabPage(t, browser, bridgeLogin, nil, 200)
+	if strings.Contains(consent, `src="`+asset+`"`) {
+		return // Gitea may reuse an existing grant after a new login.
+	}
 	grantForm := regexp.MustCompile(`(?s)<form[^>]*action="/login/oauth/grant"[^>]*>(.*?)</form>`).FindStringSubmatch(consent)
 	if len(grantForm) != 2 {
 		t.Fatal("Gitea did not show OAuth consent")
@@ -562,7 +570,7 @@ func authorizeLabBrowser(t *testing.T, browser *http.Client, giteaURL, bridgeURL
 		}
 	}
 	addLabCSRF(consent, values)
-	if dashboard := loadLabPage(t, browser, giteaURL+"/login/oauth/grant", values, 200); !strings.Contains(dashboard, "/bridge/app.js") {
+	if dashboard := loadLabPage(t, browser, giteaURL+"/login/oauth/grant", values, 200); !strings.Contains(dashboard, `src="`+asset+`"`) {
 		t.Fatal("OAuth consent did not return to the Bridge page")
 	}
 }

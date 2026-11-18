@@ -96,7 +96,9 @@ go test -v -run '^Test(PartialMerge|ReceiptIssue)Edge$' -count=1 ./...
 
 ## 已验证：HTTPS 网关回环演练
 
-使用 Windows amd64 的 Gitea v28.4.0 和 Caddy v2.11.9，在临时目录分别以 `git.office.example:随机端口` 和 `127.0.0.1:随机端口` 运行网关配置。验证 Gitea 首页菜单、普通账号 OAuth 回到原联调查询、Secure 会话、Bridge 提交链接和 Gitea 克隆地址都使用规范入口。用同一普通账号成功克隆私有仓，`/internal/hooks/gitea` 由网关直接返回 `404`。
+使用 Windows amd64 的 Gitea v28.4.0 和 Caddy v2.11.9，在临时目录分别以 `git.office.example:随机端口` 和 `127.0.0.1:随机端口` 运行网关配置。验证 Gitea 首页两条菜单、普通账号 OAuth 回到原联调查询、Secure 会话、Bridge 提交链接和 Gitea 克隆地址都使用规范入口。用同一普通账号成功克隆私有仓，`/internal/hooks/gitea` 由网关直接返回 `404`。
+
+从同一 HTTPS 入口保存联调单并签发回执，验签并与制品 SHA-256 比对。清空客户端会话后，原回执接口返回 `401`。重新经过 Gitea OAuth 回到同一条回执及联调单，签名 JSON 仍能用原公钥核验，Markdown 指向同一 Topic。
 
 测试只在客户端进程内信任临时 CA。Windows Git 保留证书链和主机名校验，因该临时 CA 没有吊销端点，单条克隆命令关闭 Schannel 吊销检查。没有修改 Windows 信任库或 Git 全局配置。实际办公网 DNS、公网域名证书、跨主机访问、tailnet 与防火墙仍须在部署环境验证。Caddy 二进制来自 [v2.11.9 发布包](https://github.com/caddyserver/caddy/releases/tag/v2.11.9)，Windows amd64 ZIP 的 SHA-256 为 `ad93112d335ee687100c4c9f11bced16ca590377976b7fe7883882b9e797e472`。
 
