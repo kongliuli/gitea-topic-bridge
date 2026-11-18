@@ -32,6 +32,16 @@ go test -v -timeout 3m -run '^TestGiteaLocalLab$' -count=1 ./...
 
 本地 Gitea 联调用普通写权限账号验证同批次中新建 PR、复用已有 PR、以及源分支不存在导致的失败分别记录；再次提交保留已完成结果，只读账号不能写入。模拟 HTTP 测试验证请求超时后重开同一数据库，回查为空不重发请求，原 PR 稍后出现（即使已合并）可通过操作标识恢复关联。
 
+## 已验证：公开上游拉取镜像
+
+Windows 回环 Gitea v28.4.0 继承实验会话的 HTTPS 出站设置，从 [octocat/Hello-World](https://github.com/octocat/Hello-World) 建立私有 Pull Mirror。确认镜像有原始提交、Bridge 总览与 Git 克隆的 SHA 一致，手动请求同步后 Gitea 更新最后同步时间。普通协作者有仓库写权限，但推送新分支收到镜像只读错误，随后查询远端确认该分支未出现。生产服务账号的 github443 路径仍须在目标机器复验。
+
+```powershell
+$env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
+$env:BRIDGE_TEST_PUBLIC_MIRROR = '1'
+go test -v -timeout 3m -run '^TestGiteaPullMirrorLab$' -count=1 ./...
+```
+
 ## 已验证：跨 Fork 建 PR
 
 本地 Gitea 用普通开发者账号从改过名的私有 Fork 向只读目标仓提交 PR，验证源和目标可用同名分支、新联调单可复用原 PR、名单内的不相关仓无法充当 Fork。删除源 Fork 后，联调单和原请求的幂等重放均返回 `404`，Topic 查询也会过滤原 PR。模拟测试补充覆盖源仓权限不足和来源未核实的过滤。此项覆盖 API，网页下拉选择和跨 Fork 合并仍待单独验收。

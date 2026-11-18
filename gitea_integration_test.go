@@ -40,27 +40,10 @@ func TestGiteaLocalLab(t *testing.T) {
 			t.Fatalf("Gitea did not render exactly one extension link %q", item)
 		}
 	}
-	createUser := func(name, scopes string, opts ...string) (string, string) {
-		t.Helper()
-		args := []string{"admin", "user", "create", "--username", name, "--email", name + "@example.invalid", "--random-password", "--must-change-password=false", "--access-token", "--access-token-name", "bridge-lab", "--access-token-scopes", scopes}
-		output, err := command(append(args, opts...)...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("create temporary user %s: %v", name, err)
-		}
-		match := regexp.MustCompile(`(?i)access token was successfully created[.:]+\s+([a-f0-9]{40})`).FindSubmatch(output)
-		if len(match) != 2 {
-			t.Fatal("Gitea CLI did not return a fixture access token")
-		}
-		password := regexp.MustCompile(`generated random password is '([^\r\n]+)'`).FindSubmatch(output)
-		if len(password) != 2 {
-			t.Fatal("Gitea CLI did not return a fixture password")
-		}
-		return string(match[1]), string(password[1])
-	}
-	ownerToken, ownerPassword := createUser("labowner", "all", "--admin")
-	readerToken, readerPassword := createUser("labreader", "read:repository,read:user")
-	reviewerToken, reviewerPassword := createUser("labreviewer", "write:repository,read:user")
-	forkToken, forkPassword := createUser("labfork", "write:repository,read:user")
+	ownerToken, ownerPassword := createLabUser(t, command, "labowner", "all", "--admin")
+	readerToken, readerPassword := createLabUser(t, command, "labreader", "read:repository,read:user")
+	reviewerToken, reviewerPassword := createLabUser(t, command, "labreviewer", "write:repository,read:user")
+	forkToken, forkPassword := createLabUser(t, command, "labfork", "write:repository,read:user")
 	api := func(method, path string, data, out any, status int) {
 		t.Helper()
 		labAPI(t, base, ownerToken, method, path, data, out, status)
@@ -642,7 +625,22 @@ func loadLabPage(t *testing.T, browser *http.Client, address string, form url.Va
 	return string(data)
 }
 
-func startLocalGitea(t *testing.T, binary, webhookAddress string) (string, func(...string) *exec.Cmd) {
+func createLabUser(t *testing.T, command func(...string) *exec.Cmd, name, scopes string, opts ...string) (string, string) {
+	t.Helper()
+	args := []string{"admin", "user", "create", "--username", name, "--email", name + "@example.invalid", "--random-password", "--must-change-password=false", "--access-token", "--access-token-name", "bridge-lab", "--access-token-scopes", scopes}
+	output, err := command(append(args, opts...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create temporary user %s: %v", name, err)
+	}
+	token := regexp.MustCompile(`(?i)access token was successfully created[.:]+\s+([a-f0-9]{40})`).FindSubmatch(output)
+	password := regexp.MustCompile(`generated random password is '([^\r\n]+)'`).FindSubmatch(output)
+	if len(token) != 2 || len(password) != 2 {
+		t.Fatal("Gitea CLI did not return the fixture token and password")
+	}
+	return string(token[1]), string(password[1])
+}
+
+func startLocalGitea(t *testing.T, binary, webhookAddress string, extraSettings ...string) (string, func(...string) *exec.Cmd) {
 	t.Helper()
 	root := t.TempDir()
 	override := filepath.Join(root, "custom", "templates", "custom")
@@ -669,6 +667,9 @@ HTTP_ADDR = 127.0.0.1
 HTTP_PORT = %d
 ROOT_URL = %s/
 DISABLE_SSH = true
+SSH_ROOT_PATH = %s/ssh
+SSH_CREATE_AUTHORIZED_KEYS_FILE = false
+SSH_CREATE_AUTHORIZED_PRINCIPALS_FILE = false
 OFFLINE_MODE = true
 APP_DATA_PATH = %s/data
 [database]
@@ -686,8 +687,8 @@ ENABLED = false
 [log]
 MODE = console
 LEVEL = warn
-`, port, base, filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root), webhookAddress)
-	if err := os.WriteFile(config, []byte(settings), 0600); err != nil {
+`, port, base, filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root), webhookAddress)
+	if err := os.WriteFile(config, []byte(settings+strings.Join(extraSettings, "\n")), 0600); err != nil {
 		t.Fatal(err)
 	}
 	command := func(args ...string) *exec.Cmd {
@@ -731,6 +732,11 @@ LEVEL = warn
 
 func labAPI(t *testing.T, base, token, method, path string, data, out any, status int) {
 	t.Helper()
+	labAPIWithTimeout(t, base, token, method, path, data, out, status, 15*time.Second)
+}
+
+func labAPIWithTimeout(t *testing.T, base, token, method, path string, data, out any, status int, timeout time.Duration) {
+	t.Helper()
 	payload, err := json.Marshal(data)
 	if err != nil {
 		t.Fatal(err)
@@ -741,7 +747,7 @@ func labAPI(t *testing.T, base, token, method, path string, data, out any, statu
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)

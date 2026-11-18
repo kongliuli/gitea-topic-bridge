@@ -72,6 +72,14 @@ Start-Service -Name GiteaTopicBridge
 
 先确认 github443 是 HTTP 代理还是 SSH 别名，分别配置服务账号的出站代理或 SSH 配置，不能混用。校验证书或主机密钥；Webhook 出站仅放行指定 Bridge 地址。不要修改机器全局代理。
 
+### 上游拉取镜像
+
+1. 用 Gitea 服务账号检查目标上游的 DNS、证书和 `git ls-remote <上游地址> HEAD`。HTTPS 使用该服务的代理环境或 Git 配置；SSH 则检查该账号的密钥、主机指纹和实际端口。使用代理时由代理限制目标地址。直接连接时可在 Gitea v28.4.0 的 `[migrations]` 设置 `EGRESS_MODE = strict` 和 `ALLOWED_HOST_LIST = github.com:443`，按实际 HTTPS 上游替换主机名和端口。参见 [对应版本配置样例](https://github.com/go-gitea/gitea/blob/v28.4.0/custom/conf/app.example.ini)。
+2. 在 Gitea 选择「迁移外部仓库」，填写上游 URL、镜像仓名，选中拉取镜像并设置更新间隔。先用公开的小仓验证，私有上游使用仅能读取目标仓的凭据。权威仓单独创建并配置分支保护。参见 [Gitea 镜像文档](https://docs.gitea.com/1.27/usage/repository/repo-mirror/)。
+3. 在镜像设置执行一次同步，比对上游与镜像默认分支的 SHA。用具备仓库写权限的普通账号克隆镜像，尝试推送一个新测试分支，确认 Gitea 明确拒绝且该分支没有出现。Bridge 可展示镜像最新提交；镜像只用作上游参考，不放进需要创建或合并 PR 的联调组。
+
+### 升级
+
 升级前备份数据库、裸仓、配置、密钥与快照；SQLite 使用在线备份或停写后复制。在副本验证 OAuth、模板、API 与 webhook，数据库迁移后需要连同数据一起回滚。独立扩展不等于永远兼容。
 
 ### 停机备份与空目录演练
