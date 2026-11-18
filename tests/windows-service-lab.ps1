@@ -124,6 +124,29 @@ function Assert-LabStatus([string]$Url, [int]$Expected) {
     if ([int]$response.StatusCode -ne $Expected) { throw "Expected HTTP $Expected at $Url, got $($response.StatusCode)." }
 }
 
+function Start-CheckedBridgeService([hashtable]$Registration) {
+    & $register @Registration
+    $serviceName = $Registration.Name
+    $script:services += $serviceName
+    $state = Get-LabService $serviceName
+    $delayed = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName").DelayedAutoStart
+    $recovery = (& $sc qfailure $serviceName) -join [Environment]::NewLine
+    $startName = $state.StartName -replace '^\.\\', "$env:COMPUTERNAME\"
+    $actualSID = [Security.Principal.NTAccount]::new($startName).Translate([Security.Principal.SecurityIdentifier])
+    $expectedSID = [Security.Principal.NTAccount]::new($Registration.Credential.UserName).Translate([Security.Principal.SecurityIdentifier])
+    if ($state.State -ne 'Stopped' -or $actualSID -ne $expectedSID -or $state.StartMode -ne 'Auto' -or $delayed -ne 1 -or
+        $recovery -notmatch '\b5000\b' -or $recovery -notmatch '\b30000\b' -or $recovery -notmatch '\b120000\b') {
+        throw "Unexpected SCM configuration for ${serviceName}: state $($state.State), identity $($state.StartName), mode $($state.StartMode), delayed $delayed. $recovery"
+    }
+    try {
+        Start-Service -Name $serviceName
+        $null = Wait-LabService $serviceName
+    } catch {
+        if (Test-Path -LiteralPath $Registration.LogFile) { Get-Content -LiteralPath $Registration.LogFile -Tail 10 | Write-Host }
+        throw
+    }
+}
+
 function Start-LabUpstream([string]$Name, [string]$BinaryPath, [pscredential]$Credential) {
     New-Service -Name $Name -BinaryPathName $BinaryPath -Credential $Credential -StartupType Manual | Out-Null
     $script:services += $Name
@@ -159,18 +182,18 @@ function New-GiteaLabUser([string]$Binary, [string[]]$Flags, [string]$Name, [str
     return @{ Token = $token.Groups[1].Value; Password = $password.Groups[1].Value }
 }
 
-function Assert-LabAccess([pscredential]$Credential, [string]$Path, [bool]$Allowed) {
+function Assert-LabAccess([pscredential]$Credential, [string]$Path, [bool]$Allowed, [System.IO.FileAccess]$Mode = 'Read') {
     $encodedPath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Path))
     $command = @'
 try {
     $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('FIXTURE_PATH'))
-    $file = [IO.File]::OpenRead($path)
+    $file = [IO.File]::Open($path, 'Open', 'FIXTURE_ACCESS', 'ReadWrite')
     $file.Dispose()
     exit 0
 } catch [UnauthorizedAccessException] { exit 13 }
 catch { exit 1 }
 '@
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command.Replace('FIXTURE_PATH', $encodedPath)))
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command.Replace('FIXTURE_PATH', $encodedPath).Replace('FIXTURE_ACCESS', [string]$Mode)))
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $parameters = @{
         FilePath = $powershell; Credential = $Credential; WorkingDirectory = $env:SystemRoot
@@ -191,14 +214,22 @@ try {
     $anchorSID = $anchor.Account.SID.Value
     $bridgeRoot = Join-Path $root 'bridge'
     $anchorRoot = Join-Path $root 'anchor'
+    $bridgeSettings = Join-Path $root 'bridge-config'
+    $anchorSettings = Join-Path $root 'anchor-config'
+    $inbox = Join-Path $root 'inbox'
+    $clientRoot = Join-Path $root 'client'
     $giteaRoot = Join-Path $root 'gitea'
     $caddyRoot = Join-Path $root 'caddy'
     $giteaSID = $gitea.Account.SID.Value
     $caddySID = $caddy.Account.SID.Value
-    New-Item -ItemType Directory -Path $root,$bridgeRoot,$anchorRoot,$giteaRoot,$caddyRoot | Out-Null
+    New-Item -ItemType Directory -Path $root,$bridgeRoot,$anchorRoot,$bridgeSettings,$anchorSettings,$inbox,$giteaRoot,$caddyRoot,$clientRoot | Out-Null
     Set-LabDirectoryAcl $root @{ $bridgeSID = 'ReadAndExecute'; $anchorSID = 'ReadAndExecute'; $giteaSID = 'ReadAndExecute'; $caddySID = 'ReadAndExecute' }
     Set-LabDirectoryAcl $bridgeRoot @{ $bridgeSID = 'Modify' }
     Set-LabDirectoryAcl $anchorRoot @{ $anchorSID = 'Modify' }
+    Set-LabDirectoryAcl $bridgeSettings @{ $bridgeSID = 'ReadAndExecute' }
+    Set-LabDirectoryAcl $anchorSettings @{ $anchorSID = 'ReadAndExecute' }
+    Set-LabDirectoryAcl $inbox @{ $bridgeSID = 'ReadAndExecute' }
+    Set-LabDirectoryAcl $clientRoot @{}
     Set-LabDirectoryAcl $giteaRoot @{ $giteaSID = 'Modify' }
     Set-LabDirectoryAcl $caddyRoot @{ $caddySID = 'Modify' }
     $app = Join-Path $root 'bridge lab.exe'
@@ -272,6 +303,7 @@ LEVEL = warn
     $null = Invoke-RestMethod @api -Method Put -Uri "$giteaUrl/api/v1/repos/labowner/fixture/collaborators/labreader" -Body '{"permission":"read"}'
     $oauthBody = @{ name='Bridge SCM lab'; confidential_client=$true; redirect_uris=@("$gatewayUrl/bridge/auth/callback") }
     $oauth = Invoke-RestMethod @api -Method Post -Uri "$giteaUrl/api/v1/user/applications/oauth2" -Body ($oauthBody | ConvertTo-Json -Compress)
+    $issuer = Invoke-RestMethod -NoProxy -TimeoutSec 10 -Uri "$giteaUrl/api/v1/user" -Headers @{ Authorization = "Bearer $($reader.Token)" }
     $caddyPath = $caddyRoot.Replace('\','/')
     $caddyConfig = Join-Path $caddyRoot 'Caddyfile'
     $caddyGlobal = @"
@@ -295,57 +327,49 @@ LEVEL = warn
         Set-Content -LiteralPath $caddyConfig -Encoding utf8NoBOM
     Start-LabUpstream "CaddyLab$suffix" ('"{0}" run --config "{1}" --adapter caddyfile' -f $caddyApp,$caddyConfig) $caddy.Credential
 
-    $config = Join-Path $bridgeRoot 'bridge config.json'
-    $bridgeSecrets = Join-Path $bridgeRoot 'bridge secrets.json'
-    $anchorSecrets = Join-Path $anchorRoot 'anchor secrets.json'
+    $config = Join-Path $bridgeSettings 'bridge config.json'
+    $bridgeSecrets = Join-Path $bridgeSettings 'bridge secrets.json'
+    $anchorSecrets = Join-Path $anchorSettings 'anchor secrets.json'
+    $snapshots = Join-Path $bridgeRoot 'snapshots'
+    $repoInbox = Join-Path $inbox ([string]$repo.id)
+    New-Item -ItemType Directory -Path $snapshots,$repoInbox | Out-Null
+    $artifact = Join-Path $repoInbox 'artifact.txt'
+    Set-Content -LiteralPath $artifact -Encoding utf8NoBOM -NoNewline -Value 'SCM inbox fixture'
+    $anchorBearer = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+    @{
+        anchor_signing_seed = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+        anchor_bearer = $anchorBearer
+    } | ConvertTo-Json | Set-Content -LiteralPath $anchorSecrets -Encoding utf8NoBOM
+    $anchorService = "AnchorLab$suffix"
+    $anchorRegistration = @{
+        Name = $anchorService; Executable = $app; AnchorDatabase = Join-Path $anchorRoot 'anchor.sqlite3'
+        Secrets = $anchorSecrets; LogFile = Join-Path $anchorRoot 'anchor.log'; Listen = $anchorListen; Credential = $anchor.Credential
+    }
+    Start-CheckedBridgeService $anchorRegistration
+    $anchorKey = [regex]::Match((Get-Content -Raw -LiteralPath $anchorRegistration.LogFile), 'independent anchor Ed25519 public key: ([A-Za-z0-9+/]{43}=)')
+    if (-not $anchorKey.Success) { throw 'The isolated Anchor did not report its public key.' }
     @{
         public_base_url = "$gatewayUrl/bridge/"; gitea_public_url = "$gatewayUrl/"
         gitea_api_url = "$giteaUrl/"; client_id = $oauth.client_id
         database_path = Join-Path $bridgeRoot 'bridge.sqlite3'
         page_size = 5; max_pages = 2
         projects = @(@{ id='lab'; name='Lab'; repositories=@(@{ id=$repo.id; owner='labowner'; name='fixture' }) })
-    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $config -Encoding utf8NoBOM
-    @{ oauth_client_secret = $oauth.client_secret } | ConvertTo-Json | Set-Content -LiteralPath $bridgeSecrets -Encoding utf8NoBOM
+        receipts = @{
+            artifact_root = $inbox; snapshot_root = $snapshots; issuers = @($issuer.id)
+            anchor = @{ url = "$anchorUrl/v1/anchors"; public_key = $anchorKey.Groups[1].Value }
+        }
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $config -Encoding utf8NoBOM
     @{
-        anchor_signing_seed = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-        anchor_bearer = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-    } | ConvertTo-Json | Set-Content -LiteralPath $anchorSecrets -Encoding utf8NoBOM
+        oauth_client_secret = $oauth.client_secret; anchor_bearer = $anchorBearer
+        receipt_signing_seed = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+    } | ConvertTo-Json | Set-Content -LiteralPath $bridgeSecrets -Encoding utf8NoBOM
 
     $bridgeService = "BridgeLab$suffix"
-    $anchorService = "AnchorLab$suffix"
     $bridgeRegistration = @{
         Name = $bridgeService; Executable = $app; Config = $config; Secrets = $bridgeSecrets
         LogFile = Join-Path $bridgeRoot 'bridge.log'; Listen = $bridgeListen; Credential = $bridge.Credential
     }
-    $anchorRegistration = @{
-        Name = $anchorService; Executable = $app; AnchorDatabase = Join-Path $anchorRoot 'anchor.sqlite3'
-        Secrets = $anchorSecrets; LogFile = Join-Path $anchorRoot 'anchor.log'; Listen = $anchorListen; Credential = $anchor.Credential
-    }
-    & $register @bridgeRegistration
-    $services += $bridgeService
-    & $register @anchorRegistration
-    $services += $anchorService
-
-    foreach ($entry in @($bridgeRegistration, $anchorRegistration)) {
-        $serviceName = $entry.Name
-        $state = Get-LabService $serviceName
-        $delayed = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName").DelayedAutoStart
-        $recovery = (& $sc qfailure $serviceName) -join [Environment]::NewLine
-        $startName = $state.StartName -replace '^\.\\', "$env:COMPUTERNAME\"
-        $actualSID = [Security.Principal.NTAccount]::new($startName).Translate([Security.Principal.SecurityIdentifier])
-        $expectedSID = [Security.Principal.NTAccount]::new($entry.Credential.UserName).Translate([Security.Principal.SecurityIdentifier])
-        if ($state.State -ne 'Stopped' -or $actualSID -ne $expectedSID -or $state.StartMode -ne 'Auto' -or $delayed -ne 1 -or
-            $recovery -notmatch '\b5000\b' -or $recovery -notmatch '\b30000\b' -or $recovery -notmatch '\b120000\b') {
-            throw "Unexpected SCM configuration for ${serviceName}: state $($state.State), identity $($state.StartName), mode $($state.StartMode), delayed $delayed. $recovery"
-        }
-        try {
-            Start-Service -Name $serviceName
-            $null = Wait-LabService $serviceName
-        } catch {
-            if (Test-Path -LiteralPath $entry.LogFile) { Get-Content -LiteralPath $entry.LogFile -Tail 10 | Write-Host }
-            throw
-        }
-    }
+    Start-CheckedBridgeService $bridgeRegistration
     Assert-LabStatus "$bridgeUrl/bridge/" 200
     Assert-LabStatus "$bridgeUrl/bridge/api/projects" 401
     Assert-LabStatus "$anchorUrl/v1/anchors" 405
@@ -353,6 +377,11 @@ LEVEL = warn
     Assert-LabAccess $bridge.Credential $anchorSecrets $false
     Assert-LabAccess $anchor.Credential $anchorSecrets $true
     Assert-LabAccess $anchor.Credential $bridgeSecrets $false
+    Assert-LabAccess $bridge.Credential $config $false 'Write'
+    Assert-LabAccess $bridge.Credential $artifact $true
+    Assert-LabAccess $bridge.Credential $artifact $false 'Write'
+    Assert-LabAccess $bridge.Credential (Join-Path $giteaRoot 'data/gitea.db') $false
+    Assert-LabAccess $bridge.Credential $anchorRegistration.AnchorDatabase $false
     foreach ($port in @($bridgePort, $anchorPort, $giteaPort, $gatewayPort)) {
         $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port)
         if ($listeners.Count -ne 1 -or $listeners[0].LocalAddress -ne '127.0.0.1') { throw "Unexpected listener on port $port." }
@@ -367,10 +396,10 @@ LEVEL = warn
     Assert-LabStatus "$bridgeUrl/bridge/" 200
     Write-Host "SCM restarted Bridge after terminating the fixture process: $($current.ProcessId) -> $($recovered.ProcessId)."
 
-    $env:BRIDGE_TEST_SCM_STACK = Join-Path $root 'client fixture.json'
+    $env:BRIDGE_TEST_SCM_STACK = Join-Path $clientRoot 'client fixture.json'
     @{
         gateway = $gatewayUrl; ca = Join-Path $caddyRoot 'storage/pki/authorities/local/root.crt'
-        repository_id = $repo.id; password = $reader.Password
+        repository_id = $repo.id; password = $reader.Password; anchor_public_key = $anchorKey.Groups[1].Value
     } | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
     & go test -v -timeout 2m -run '^TestSCMHostedStack$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted stack did not pass HTTPS acceptance.' }
