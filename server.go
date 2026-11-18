@@ -30,6 +30,7 @@ type ServerConfig struct {
 	AllowLoopbackHTTP  bool        `json:"allow_loopback_http"`
 	EnablePullCreation bool        `json:"enable_pull_creation"`
 	EnableMerge        bool        `json:"enable_merge"`
+	EnableRevert       bool        `json:"enable_revert"`
 	PageSize           int         `json:"page_size"`
 	MaxPages           int         `json:"max_pages"`
 	Projects           []Project   `json:"projects"`
@@ -51,8 +52,8 @@ var projectID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 var site embed.FS
 
 func NewServer(config ServerConfig) (http.Handler, error) {
-	if (config.EnablePullCreation || config.EnableMerge) && config.TopicStore == nil {
-		return nil, errors.New("enable_pull_creation and enable_merge require a Bridge database")
+	if (config.EnablePullCreation || config.EnableMerge || config.EnableRevert) && config.TopicStore == nil {
+		return nil, errors.New("write features require a Bridge database")
 	}
 	public, publicErr := baseURL(config.PublicBaseURL)
 	giteaPublic, giteaPublicErr := baseURL(config.GiteaPublicURL)
@@ -99,6 +100,9 @@ func NewServer(config ServerConfig) (http.Handler, error) {
 	}
 	if config.EnableMerge {
 		mux.HandleFunc("POST /bridge/api/topics/{id}/members/{member}/merge", server.withUser(server.mergeTopicMember))
+	}
+	if config.EnableRevert {
+		mux.HandleFunc("POST /bridge/api/topics/{id}/members/{member}/revert-pr", server.withUser(server.revertTopicMember))
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
@@ -193,12 +197,13 @@ func (server *Server) listProjects(writer http.ResponseWriter, request *http.Req
 		}
 	}
 	responseJSON(writer, http.StatusOK, struct {
-		User         string           `json:"user"`
-		Projects     []projectSummary `json:"projects"`
-		SavedTopics  bool             `json:"saved_topics"`
-		PullCreation bool             `json:"pull_creation"`
-		MergeEnabled bool             `json:"merge_enabled"`
-	}{user.Login, projects, server.config.TopicStore != nil, server.config.EnablePullCreation, server.config.EnableMerge})
+		User          string           `json:"user"`
+		Projects      []projectSummary `json:"projects"`
+		SavedTopics   bool             `json:"saved_topics"`
+		PullCreation  bool             `json:"pull_creation"`
+		MergeEnabled  bool             `json:"merge_enabled"`
+		RevertEnabled bool             `json:"revert_enabled"`
+	}{user.Login, projects, server.config.TopicStore != nil, server.config.EnablePullCreation, server.config.EnableMerge, server.config.EnableRevert})
 }
 
 func (server *Server) lookupTopic(writer http.ResponseWriter, request *http.Request, client *Gitea, _ GiteaUser) {

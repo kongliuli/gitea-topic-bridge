@@ -6,6 +6,7 @@
   "database_path": "C:/BridgeData/bridge.db",
   "enable_pull_creation": false,
   "enable_merge": false,
+  "enable_revert": false,
   "page_size": 25,
   "max_pages": 8,
   "projects": [

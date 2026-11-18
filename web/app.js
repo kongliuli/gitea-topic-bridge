@@ -18,6 +18,7 @@ let activeQuery;
 let storeEnabled = false;
 let writesEnabled = false;
 let mergeEnabled = false;
+let revertEnabled = false;
 let draft;
 let savedBatch;
 let mergeBusy = false;
@@ -219,6 +220,7 @@ async function openSavedTopic(id, note = '') {
         const repoResult = repos.find((item) => item.repository.id === repo.id);
         const pull = repoResult.pull_requests.find((item) => item.number === member.pull_number);
         renderMerge(card, id, member, pull);
+        renderRevert(card, id, member, repoResult.pull_requests);
       } else if (writesEnabled) {
         const include = inputRow(card, member.state === 'unconfirmed' ? '仅核对此仓的 PR' : '选中此仓建 PR', 'checkbox');
         selected.push({ include, member });
@@ -294,6 +296,60 @@ function renderMerge(card, topicID, member, pull) {
   card.append(button);
 }
 
+function renderRevert(card, topicID, member, pulls) {
+  if (member.merge?.state !== 'merged') return;
+  const revert = member.revert;
+  if (revert?.state === 'opened') {
+    const pull = pulls.find((item) => item.number === revert.pull_number);
+    if (pull) {
+      const link = element('a', `反向 PR #${revert.pull_number}（到 Gitea 审批）`);
+      link.href = pull.url;
+      card.append(link);
+    } else {
+      card.append(element('p', `反向 PR #${revert.pull_number} 已建立；请到仓库核对并审批。`));
+    }
+    return;
+  }
+  if (revert?.state === 'manual') {
+    card.append(element('p', '无法安全生成反向 PR，请在 Gitea 人工检查。主干未由 Bridge 修改。'));
+    return;
+  }
+  if (!revertEnabled) return;
+  const reconcile = revert?.state === 'pull_pending';
+  const resumeBranch = revert?.state === 'branch_pending';
+  if (revert) card.append(element('p', `反向操作待核对 · ${revert.branch}`));
+  const button = element('button', reconcile ? '核对反向 PR' : resumeBranch ? '核对并继续生成反向 PR' : '确认生成反向 PR');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    if (mergeBusy || savedBatch?.id !== topicID) return;
+    if (!reconcile && !window.confirm(`基于合并提交 ${member.merge.merge_sha} 准备反向 PR？不会合并，也不会直接修改 ${member.target_branch}。`)) return;
+    const current = savedBatch;
+    mergeBusy = true;
+    button.disabled = true;
+    message.textContent = '正在处理反向 PR…';
+    let note = '已刷新反向 PR 状态';
+    try {
+      const response = await fetch(`/bridge/api/topics/${encodeURIComponent(topicID)}/members/${member.id}/revert-pr`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: !reconcile, reconcile, expected_merge: member.merge.merge_sha }),
+      });
+      if (savedBatch !== current) return;
+      if (response.status === 401) return requireLogin();
+      if (response.status === 403) note = '当前账号不能生成反向 PR';
+      else if (response.status === 409) note = '无法安全自动反向，请在 Gitea 人工检查';
+      else if (!response.ok) note = '未收到确认，先核对已保存的状态';
+    } catch {
+      note = '未收到确认，先核对已保存的状态';
+    } finally {
+      mergeBusy = false;
+      button.disabled = false;
+    }
+    if (savedBatch === current) await openSavedTopic(topicID, note);
+  });
+  card.append(button);
+}
+
 createPulls.addEventListener('click', async () => {
   const batch = savedBatch;
   if (!batch) return;
@@ -350,6 +406,7 @@ async function loadProjects() {
     storeEnabled = data.saved_topics;
     writesEnabled = data.pull_creation;
     mergeEnabled = data.merge_enabled;
+    revertEnabled = data.revert_enabled;
     logout.hidden = false;
     const params = new URLSearchParams(location.search);
     const saved = storeEnabled && /^[A-Za-z0-9_-]{43}$/.test(params.get('topic_id') ?? '') ? params.get('topic_id') : null;

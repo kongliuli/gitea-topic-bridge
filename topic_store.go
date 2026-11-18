@@ -28,16 +28,17 @@ type TopicChangeSet struct {
 }
 
 type TopicMember struct {
-	ID           int64       `json:"id"`
-	RepositoryID int64       `json:"repository_id"`
-	SourceBranch string      `json:"source_branch,omitempty"`
-	TargetBranch string      `json:"target_branch,omitempty"`
-	State        string      `json:"state"`
-	PullNumber   int64       `json:"pull_number,omitempty"`
-	ResultCode   string      `json:"result_code,omitempty"`
-	ActorID      int64       `json:"actor_id,omitempty"`
-	UpdatedAt    *time.Time  `json:"updated_at,omitempty"`
-	Merge        *MergeState `json:"merge,omitempty"`
+	ID           int64        `json:"id"`
+	RepositoryID int64        `json:"repository_id"`
+	SourceBranch string       `json:"source_branch,omitempty"`
+	TargetBranch string       `json:"target_branch,omitempty"`
+	State        string       `json:"state"`
+	PullNumber   int64        `json:"pull_number,omitempty"`
+	ResultCode   string       `json:"result_code,omitempty"`
+	ActorID      int64        `json:"actor_id,omitempty"`
+	UpdatedAt    *time.Time   `json:"updated_at,omitempty"`
+	Merge        *MergeState  `json:"merge,omitempty"`
+	Revert       *RevertState `json:"revert,omitempty"`
 }
 
 func OpenTopicStore(ctx context.Context, path string) (*TopicStore, error) {
@@ -114,7 +115,7 @@ PRAGMA user_version=1;`); err != nil {
 			return err
 		}
 		fallthrough
-	case 1, 2, 3:
+	case 1, 2, 3, 4:
 		if version != 0 && applicationID != bridgeApplicationID {
 			return errors.New("database is not owned by Bridge")
 		}
@@ -148,6 +149,23 @@ CREATE TABLE pull_merges (
 ) STRICT;
 CREATE INDEX topic_members_pull ON topic_members(repo_id, pull_number);
 PRAGMA user_version=3;`); err != nil {
+			return err
+		}
+	}
+	if version < 4 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE pull_reverts (
+    repo_id INTEGER NOT NULL,
+    original_pull INTEGER NOT NULL,
+    merge_sha TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('branch_pending', 'pull_pending', 'opened', 'manual')),
+    pull_number INTEGER NOT NULL,
+    inverse_sha TEXT NOT NULL,
+    PRIMARY KEY (repo_id, original_pull, merge_sha)
+) STRICT;
+PRAGMA user_version=4;`); err != nil {
 			return err
 		}
 	}
@@ -186,9 +204,12 @@ SELECT members.id, members.repo_id, members.source_branch, members.target_branch
     members.pull_number, members.result_code, members.actor_id, members.updated_at_ns,
     COALESCE(merge.revision, 0), COALESCE(merge.state, ''), COALESCE(merge.result_code, ''),
     COALESCE(merge.expected_head, ''), COALESCE(merge.requested_by, 0), COALESCE(merge.merge_sha, ''),
-    COALESCE(merge.merged_by, 0), COALESCE(merge.merged_at_ns, 0)
+    COALESCE(merge.merged_by, 0), COALESCE(merge.merged_at_ns, 0),
+    COALESCE(revert.revision, 0), COALESCE(revert.state, ''), COALESCE(revert.branch, ''),
+    COALESCE(revert.pull_number, 0), COALESCE(revert.inverse_sha, '')
 FROM topic_members AS members
 LEFT JOIN pull_merges AS merge ON merge.repo_id = members.repo_id AND merge.pull_number = members.pull_number
+LEFT JOIN pull_reverts AS revert ON revert.repo_id = members.repo_id AND revert.original_pull = members.pull_number AND revert.merge_sha = merge.merge_sha
 WHERE members.topic_id = ? ORDER BY members.id`, topic.ID)
 	if err != nil {
 		return TopicChangeSet{}, "", err
@@ -197,9 +218,11 @@ WHERE members.topic_id = ? ORDER BY members.id`, topic.ID)
 	for rows.Next() {
 		var member TopicMember
 		var merge MergeState
+		var revert RevertState
 		var updated, mergedAt int64
 		if err := rows.Scan(&member.ID, &member.RepositoryID, &member.SourceBranch, &member.TargetBranch, &member.State, &member.PullNumber, &member.ResultCode, &member.ActorID, &updated,
-			&merge.revision, &merge.State, &merge.ResultCode, &merge.ExpectedHead, &merge.RequestedBy, &merge.MergeSHA, &merge.MergedBy, &mergedAt); err != nil {
+			&merge.revision, &merge.State, &merge.ResultCode, &merge.ExpectedHead, &merge.RequestedBy, &merge.MergeSHA, &merge.MergedBy, &mergedAt,
+			&revert.revision, &revert.State, &revert.Branch, &revert.PullNumber, &revert.InverseSHA); err != nil {
 			return TopicChangeSet{}, "", err
 		}
 		if merge.revision > 0 {
@@ -208,6 +231,9 @@ WHERE members.topic_id = ? ORDER BY members.id`, topic.ID)
 				merge.MergedAt = &value
 			}
 			member.Merge = &merge
+		}
+		if revert.revision > 0 {
+			member.Revert = &revert
 		}
 		if updated != 0 {
 			value := time.Unix(0, updated).UTC()

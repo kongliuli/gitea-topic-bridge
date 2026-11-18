@@ -117,7 +117,7 @@ func (server *Server) startLogin(writer http.ResponseWriter, request *http.Reque
 	server.setCookie(writer, stateCookie, state, int(loginLifetime.Seconds()))
 	sum := sha256.Sum256([]byte(verifier))
 	scope := "read:user read:repository"
-	if server.config.EnablePullCreation || server.config.EnableMerge {
+	if server.config.EnablePullCreation || server.config.EnableMerge || server.config.EnableRevert {
 		scope = "read:user write:repository"
 	}
 	authorize := server.giteaPublic.JoinPath("login", "oauth", "authorize")

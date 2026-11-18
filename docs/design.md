@@ -17,7 +17,7 @@
 |GET /bridge/api/topics/{id}|逐仓只读状态与部分成功摘要|
 |POST /bridge/api/topics/{id}/pulls|确认后逐仓创建或复用 PR，保存逐仓结果|
 |POST /bridge/api/topics/{id}/members/{member}/merge|当前用户确认的单仓合并，或仅核对合并结果|
-|POST /bridge/api/topics/{id}/members/{member}/revert-pr|当前用户确认的反向 PR（待实现）|
+|POST /bridge/api/topics/{id}/members/{member}/revert-pr|当前用户确认的反向 PR，或仅核对结果|
 |POST /internal/hooks/gitea|仅服务间访问；验签入队后返回 202|
 |POST /bridge/api/receipts；GET /bridge/api/receipts/{id}|创建快照、查看、导出 JSON/Markdown|
 
@@ -40,3 +40,9 @@
 开启 `enable_merge` 后，单仓合并接口接收同源 JSON `{"confirm":true,"expected_head":"完整提交 SHA"}`。只操作已关联的同仓 PR；Bridge 重新核对 PR 身份、目标分支、当前提交、正式评审及当前用户权限。目标分支必须受保护、至少要求一人批准，且当前用户不得直接推送。Gitea 最终检查指定评审人、必跑状态等规则；Bridge 固定用普通 merge 方式，将预期提交传给 Gitea，不请求强制合并、自动合并或删除源分支。
 
 Bridge 在发出合并前持久记录待核对状态。同一个仓库的同一个 PR 即使出现在多张联调单，待核对时也不会发第二次请求。`{"reconcile":true}` 只读 Gitea 并更新本地证据；只有回查到实际合并 SHA、执行人与时间才显示已核验。Gitea 明确拒绝则保留逐仓受阻原因，修复后需重新确认。回查仍不确定时保留待核对，不自动重发；可在 Gitea 人工核对。一个仓失败不会撤销其他仓的合并。
+
+### 反向 PR
+
+开启 `enable_revert` 后，接口接收 `{"confirm":true,"expected_merge":"已核验的完整合并 SHA"}`。当前仅自动处理仍处于目标分支顶端、第二父提交能和原 PR 核对的普通双亲合并；只处理小批量、常规模式的文件。目标分支已前进、非普通合并、超出读取上限或无法验证内容，转人工处理。
+
+Bridge 根据实际合并提交和第一父提交的树差异，仅向独立 `bridge-revert-…` 分支提交逆向改动，再确认该分支的父提交是实际合并 SHA，且结果树等于合并前。通过后才开 PR，不 reset、强推、删除分支或自动合并。PR 保留 Gitea 原有审批和检查规则。跨联调单共享逐阶段记录，失败或断线不重复发送同一阶段的写请求；如果分支已核验但 PR 尚未提交，可在用户再次确认后继续。`{"reconcile":true,"expected_merge":"已核验的完整合并 SHA"}` 只做回查，不写 Gitea。

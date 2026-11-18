@@ -267,6 +267,53 @@ func TestGiteaLocalLab(t *testing.T) {
 	if remaining == nil || remaining.State != "blocked" || remaining.ResultCode != "pull_not_ready" || readMergeTarget(repos[1], batch.Members[1], false).Merged {
 		t.Fatalf("conflicting repository did not stay blocked: %+v", remaining)
 	}
+	revertURL := func(member TopicMember) string {
+		return fmt.Sprintf("%s/bridge/api/topics/%s/members/%d/revert-pr", writerURL, batch.ID, member.ID)
+	}
+	revertBody := func(member TopicMember) string {
+		return fmt.Sprintf(`{"confirm":true,"expected_merge":%q}`, member.Merge.MergeSHA)
+	}
+	planned := mergedBatch.Members[0]
+	api("PATCH", "/repos/labowner/merged/branch_protections/main", map[string]bool{"enable_push": true}, nil, 200)
+	api("POST", "/repos/labowner/merged/contents/later.txt", map[string]string{
+		"branch": "main", "message": "Advance the branch after merging", "content": "dGVzdAo=",
+	}, nil, 201)
+	api("PATCH", "/repos/labowner/merged/branch_protections/main", map[string]bool{"enable_push": false}, nil, 200)
+	postLabTopic(t, writer, revertURL(planned), writerURL, "", revertBody(planned), 409)
+	advancedBranch, _ := revertIdentity(repos[0], planned)
+	api("GET", "/repos/labowner/merged/branches/"+advancedBranch, nil, nil, 404)
+
+	planned = mergedBatch.Members[2]
+	postLabTopic(t, writer, revertURL(planned), "https://untrusted.invalid", "", revertBody(planned), 403)
+	opened := postLabTopic(t, writer, revertURL(planned), writerURL, "", revertBody(planned), 200)
+	revert := opened.Members[2].Revert
+	if revert == nil || revert.State != "opened" || revert.PullNumber < 1 || revert.InverseSHA == "" {
+		t.Fatalf("reverse PR not created: %+v", revert)
+	}
+	repeated := postLabTopic(t, writer, revertURL(planned), writerURL, "", revertBody(planned), 200)
+	if repeated.Members[2].Revert.PullNumber != revert.PullNumber || repeated.Version != opened.Version {
+		t.Fatal("reverse PR confirmation was not idempotent")
+	}
+	var target revertBranch
+	api("GET", "/repos/labowner/no-match/branches/main", nil, &target, 200)
+	if target.Commit.ID != planned.Merge.MergeSHA {
+		t.Fatal("reverse PR changed the protected branch")
+	}
+	inverseTarget := readMergeTarget(repos[2], TopicMember{PullNumber: revert.PullNumber}, true)
+	if inverseTarget.Head.SHA != revert.InverseSHA || !inverseTarget.Mergeable || inverseTarget.Merged {
+		t.Fatalf("unexpected reverse PR state: %+v", inverseTarget)
+	}
+	inverseMergePath := fmt.Sprintf("/repos/labowner/no-match/pulls/%d/merge", revert.PullNumber)
+	api("POST", "/repos/labowner/no-match/statuses/"+revert.InverseSHA, map[string]string{"state": "success", "context": "fixture/required"}, nil, 201)
+	labAPI(t, base, reviewerToken, "POST", inverseMergePath, map[string]string{"do": "merge", "head_commit_id": revert.InverseSHA}, nil, 405)
+	api("GET", "/repos/labowner/no-match/branches/main", nil, &target, 200)
+	if target.Commit.ID != planned.Merge.MergeSHA {
+		t.Fatal("reverse PR could update main without approval")
+	}
+	api("POST", fmt.Sprintf("/repos/labowner/no-match/pulls/%d/reviews", revert.PullNumber),
+		map[string]string{"event": "APPROVED", "body": "Independent approval for reverse PR"}, nil, 200)
+	labAPI(t, base, reviewerToken, "POST", inverseMergePath, map[string]string{"do": "merge", "head_commit_id": revert.InverseSHA}, nil, 200)
+	api("GET", "/repos/labowner/no-match/contents/bridge-source.txt?ref=main", nil, nil, 404)
 	api("DELETE", "/repos/labowner/conflict/collaborators/labreader", nil, nil, 204)
 	results = lookup(3)
 	if len(results) != 2 || results[1].Repository.Name != "no-match" {
@@ -313,7 +360,7 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	}, &creds, 201)
 	handler, err := NewServer(ServerConfig{PublicBaseURL: bridgeURL + "/bridge/", GiteaPublicURL: giteaURL, GiteaAPIURL: giteaURL,
 		ClientID: creds.ID, ClientSecret: creds.Secret, AllowLoopbackHTTP: true, PageSize: 1, MaxPages: 3,
-		TopicStore: store, EnablePullCreation: true, EnableMerge: true,
+		TopicStore: store, EnablePullCreation: true, EnableMerge: true, EnableRevert: true,
 		Projects: []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
 	})
 	if err != nil {
