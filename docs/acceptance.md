@@ -70,7 +70,13 @@ go test -v -timeout 3m -run '^TestGiteaPullMirrorLab$' -count=1 ./...
 
 本地 Gitea 测试验证目标分支前进后拒绝自动准备，也不会新建分支；符合条件时用当前协作者建反向 PR，创建与重试不改主干、不重复开单。给反向 PR 补齐 CI 后，仍须另行人工批准才能合并；审批后由 Gitea 合并，验证原 PR 新增文件已撤回。模拟测试覆盖两阶段超时、数据库重开后回查、只读核对与恢复原 PR 关联。
 
-隔离 Edge 使用三仓模拟响应，网页汇总展示「已核验合并 2/3 仓，受阻 1 仓」，受阻仓有对应标记。反向 PR 链接明确指向 Gitea 审批页。
+启用 `BRIDGE_TEST_EDGE_BINARY` 后，同一个集成用例由 Edge 操作实际页面。普通协作者逐仓核对确认框中的提交 SHA 并确认，页面显示「已核验合并 2/3 仓，受阻 1 仓」，冲突仓单独标红。随后在网页确认生成反向 PR，点击「到 Gitea 审批」进入实际 PR。用例还核对了 Gitea 的实际合并结果和未审批时的拒绝结果。[Windows 浏览器合并与反向 PR 验收](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44399374989)
+
+```powershell
+$env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
+$env:BRIDGE_TEST_EDGE_BINARY = 'C:\path\to\msedge.exe' # 需要带内置 WebSocket 的 Node.js
+go test -v -timeout 4m -run '^TestGiteaLocalLab$' -count=1 .
+```
 
 ## 已验证：内部 Webhook
 
