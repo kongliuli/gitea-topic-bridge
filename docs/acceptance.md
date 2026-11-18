@@ -18,7 +18,17 @@ go test -v -timeout 3m -run '^TestGiteaLocalLab$' -count=1 ./...
 
 测试创建临时回环实例和 SQLite 数据库，自动生成测试账号及令牌，运行后停止实例。一个账号建立四个私有测试仓，Bridge 查询使用另一个普通账号的授权。验证已合并和开放 PR、同仓多个匹配、分页上限、相近编号不误匹配、不可见仓过滤，以及撤销仓库权限后不再返回该仓。
 
-同一测试还提交真实 Gitea 登录和 OAuth 授权表单，经回调进入 Bridge，在会话中查询私有仓，再退出并确认 API 返回 `401`。测试为开放 PR 提交合成的 CI 成功/失败状态和一条正式批准，核对返回的 CI、批准数量、变更文件数；有冲突的样例与无冲突的样例呈现不同状态，但 `mergeable=false` 不会被当作已确认冲突。这是本地 HTTP 流程测试，不代表已验证浏览器渲染、生产 TLS、Gitea 菜单、CI 运行器或分支保护策略。
+同一测试还提交真实 Gitea 登录和 OAuth 授权表单，经回调进入 Bridge，在会话中查询私有仓，再退出并确认 API 返回 `401`。测试为开放 PR 提交合成的 CI 成功/失败状态和一条正式批准，核对返回的 CI、批准数量、变更文件数。有冲突的样例与无冲突的样例呈现不同状态，`mergeable=false` 显示为暂不可合并、原因未知。真实 Runner 验收见下一节。
+
+## 已验证：真实 Runner 的 CI 结果
+
+在 Windows 回环实例启动 Gitea Runner v6.0.0，注册范围是一个私有合成仓。两条分支触发同一条 PowerShell 工作流，分别成功和失败，普通只读账号通过 Bridge 在两个 PR 的 head SHA 上读到对应的状态。工作流只执行测试内定义的命令，未从外部加载 Actions。生产仓的工作流、Runner 隔离、出站和必跑检查名称须按实际项目复验。Runner 二进制来自 [v6.0.0 发布目录](https://dl.gitea.com/gitea-runner/6.0.0/)，Windows amd64 文件的 SHA-256 为 `d85ac9d2a2814704836c808a7ad166a57a81f6b9e1e3afc7d3eda798540062a3`。
+
+```powershell
+$env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
+$env:BRIDGE_TEST_RUNNER_BINARY = 'C:\path\to\gitea-runner-6.0.0-windows-amd64.exe'
+go test -v -timeout 3m -run '^TestGiteaRunnerLab$' -count=1 ./...
+```
 
 ## 已验证：项目总览与保护巡检
 
