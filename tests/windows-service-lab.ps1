@@ -198,7 +198,7 @@ function Start-CheckedBridgeService([hashtable]$Registration) {
 }
 
 function Start-LabUpstream([string]$Name, [string]$BinaryPath, [pscredential]$Credential) {
-    New-Service -Name $Name -BinaryPathName $BinaryPath -Credential $Credential -StartupType Manual | Out-Null
+    New-Service -Name $Name -BinaryPathName $BinaryPath -Credential $Credential -StartupType Automatic | Out-Null
     $script:services += $Name
     Start-Service -Name $Name
     $state = Wait-LabService $Name
@@ -428,11 +428,37 @@ LEVEL = warn
     Assert-LabAccess $bridge.Credential (Join-Path $giteaRoot 'data/gitea.db') $false
     Assert-LabAccess $bridge.Credential $anchorRegistration.AnchorDatabase $false
     $listenPorts = @($bridgePort, $anchorPort, $giteaPort, $gatewayPort)
-    foreach ($port in $listenPorts) {
-        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port)
-        if ($listeners.Count -ne 1 -or $listeners[0].LocalAddress -ne '127.0.0.1') { throw "Unexpected listener on port $port." }
+    $hostProbe = Join-Path $PSScriptRoot '../examples/Test-BridgeWindowsServices.ps1'
+    $hostServices = @(
+        @{ Name=$giteaService; Account=$gitea.Credential.UserName; Ports=$giteaPort; LoopbackOnly=$true }
+        @{ Name=$bridgeService; Account=$bridge.Credential.UserName; Ports=$bridgePort; LoopbackOnly=$true; DelayedAutoStart=$true }
+        @{ Name=$caddyService; Account=$caddy.Credential.UserName; Ports=$gatewayPort; LoopbackOnly=$true }
+        @{ Name=$anchorService; Account=$anchor.Credential.UserName; Ports=$anchorPort; LoopbackOnly=$true; DelayedAutoStart=$true }
+    )
+    $hostReport = & $hostProbe -Services $hostServices
+    if ($LASTEXITCODE -ne 0 -or -not ($hostReport | ConvertFrom-Json).passed) {
+        $hostReport | Write-Host
+        throw 'The Windows host probe rejected the four configured services.'
     }
-    Write-Host 'SCM verified both service identities, delayed start, recovery settings, loopback bindings and ACL isolation.'
+    $baseline = Join-Path $clientRoot 'host-before.json'
+    Set-Content -LiteralPath $baseline -Value $hostReport -Encoding utf8NoBOM
+    $wrongServices = @($hostServices | ForEach-Object { $_.Clone() })
+    $wrongServices[0].Account = $caddy.Credential.UserName
+    $wrongServices[1].Ports = $anchorPort
+    Set-Service -Name $caddyService -StartupType Manual
+    try {
+        $deniedReport = & $hostProbe -Services $wrongServices -BeforeRestart $baseline
+        $deniedExitCode = $LASTEXITCODE
+    } finally {
+        Set-Service -Name $caddyService -StartupType Automatic
+    }
+    $denied = $deniedReport | ConvertFrom-Json
+    if ($deniedExitCode -ne 1 -or $denied.passed -or $denied.restart.passed -or
+        $denied.services[0].account_matches -or $denied.services[1].ports[0].passed -or $denied.services[2].automatic_start) {
+        $deniedReport | Write-Host
+        throw 'The Windows host probe did not reject an unchanged boot, incorrect account, unowned port and manual startup.'
+    }
+    Write-Host 'Windows host probe verified real service accounts, process ownership and automatic startup settings; it rejected an unchanged boot, incorrect account, unowned port and manual startup.'
 
     $current = Get-LabService $bridgeService
     $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($current.ProcessId)"
