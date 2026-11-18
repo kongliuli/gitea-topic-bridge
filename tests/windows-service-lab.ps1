@@ -144,8 +144,16 @@ function Wait-LabService([string]$Name, [int]$DifferentFrom = 0) {
 function Stop-LabStack([string[]]$StartOrder, [int[]]$ListenPorts) {
     for ($i = $StartOrder.Count - 1; $i -ge 0; $i--) {
         $service = $StartOrder[$i]
-        Stop-Service -Name $service
-        (Get-Service -Name $service).WaitForStatus('Stopped', [timespan]::FromSeconds(20))
+        $processId = (Get-LabService $service).ProcessId
+        $process = Get-Process -Id $processId
+        try {
+            $null = $process.Handle
+            Stop-Service -Name $service
+            (Get-Service -Name $service).WaitForStatus('Stopped', [timespan]::FromSeconds(20))
+            if (-not $process.WaitForExit(40000)) { throw "Service $service reported Stopped but process $processId did not exit." }
+        } finally {
+            $process.Dispose()
+        }
     }
     foreach ($port in $ListenPorts) {
         if (@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue).Count -ne 0) {
