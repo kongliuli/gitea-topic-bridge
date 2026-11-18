@@ -20,17 +20,18 @@ type Project struct {
 }
 
 type ServerConfig struct {
-	PublicBaseURL     string      `json:"public_base_url"`
-	GiteaPublicURL    string      `json:"gitea_public_url"`
-	GiteaAPIURL       string      `json:"gitea_api_url"`
-	ClientID          string      `json:"client_id"`
-	ClientSecret      string      `json:"-"`
-	DatabasePath      string      `json:"database_path"`
-	TopicStore        *TopicStore `json:"-"`
-	AllowLoopbackHTTP bool        `json:"allow_loopback_http"`
-	PageSize          int         `json:"page_size"`
-	MaxPages          int         `json:"max_pages"`
-	Projects          []Project   `json:"projects"`
+	PublicBaseURL      string      `json:"public_base_url"`
+	GiteaPublicURL     string      `json:"gitea_public_url"`
+	GiteaAPIURL        string      `json:"gitea_api_url"`
+	ClientID           string      `json:"client_id"`
+	ClientSecret       string      `json:"-"`
+	DatabasePath       string      `json:"database_path"`
+	TopicStore         *TopicStore `json:"-"`
+	AllowLoopbackHTTP  bool        `json:"allow_loopback_http"`
+	EnablePullCreation bool        `json:"enable_pull_creation"`
+	PageSize           int         `json:"page_size"`
+	MaxPages           int         `json:"max_pages"`
+	Projects           []Project   `json:"projects"`
 }
 
 type Server struct {
@@ -49,6 +50,9 @@ var projectID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 var site embed.FS
 
 func NewServer(config ServerConfig) (http.Handler, error) {
+	if config.EnablePullCreation && config.TopicStore == nil {
+		return nil, errors.New("enable_pull_creation requires a Bridge database")
+	}
 	public, publicErr := baseURL(config.PublicBaseURL)
 	giteaPublic, giteaPublicErr := baseURL(config.GiteaPublicURL)
 	giteaAPI, giteaAPIErr := baseURL(config.GiteaAPIURL)
@@ -88,6 +92,9 @@ func NewServer(config ServerConfig) (http.Handler, error) {
 	if config.TopicStore != nil {
 		mux.HandleFunc("POST /bridge/api/topics", server.withUser(server.createTopic))
 		mux.HandleFunc("GET /bridge/api/topics/{id}", server.withUser(server.getTopic))
+	}
+	if config.EnablePullCreation {
+		mux.HandleFunc("POST /bridge/api/topics/{id}/pulls", server.withUser(server.createTopicPulls))
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
@@ -182,10 +189,11 @@ func (server *Server) listProjects(writer http.ResponseWriter, request *http.Req
 		}
 	}
 	responseJSON(writer, http.StatusOK, struct {
-		User        string           `json:"user"`
-		Projects    []projectSummary `json:"projects"`
-		SavedTopics bool             `json:"saved_topics"`
-	}{user.Login, projects, server.config.TopicStore != nil})
+		User         string           `json:"user"`
+		Projects     []projectSummary `json:"projects"`
+		SavedTopics  bool             `json:"saved_topics"`
+		PullCreation bool             `json:"pull_creation"`
+	}{user.Login, projects, server.config.TopicStore != nil, server.config.EnablePullCreation})
 }
 
 func (server *Server) lookupTopic(writer http.ResponseWriter, request *http.Request, client *Gitea, _ GiteaUser) {

@@ -116,10 +116,14 @@ func (server *Server) startLogin(writer http.ResponseWriter, request *http.Reque
 	}
 	server.setCookie(writer, stateCookie, state, int(loginLifetime.Seconds()))
 	sum := sha256.Sum256([]byte(verifier))
+	scope := "read:user read:repository"
+	if server.config.EnablePullCreation {
+		scope = "read:user write:repository"
+	}
 	authorize := server.giteaPublic.JoinPath("login", "oauth", "authorize")
 	authorize.RawQuery = url.Values{
 		"client_id": {server.config.ClientID}, "response_type": {"code"}, "redirect_uri": {server.callbackURL()},
-		"scope": {"read:user read:repository"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(sum[:])}, "code_challenge_method": {"S256"},
+		"scope": {scope}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(sum[:])}, "code_challenge_method": {"S256"},
 	}.Encode()
 	http.Redirect(writer, request, authorize.String(), http.StatusSeeOther)
 }

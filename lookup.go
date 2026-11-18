@@ -33,6 +33,9 @@ type PullRequest struct {
 	CI           string          `json:"ci,omitempty"`
 	Conflict     string          `json:"conflict,omitempty"`
 	Reviews      *ReviewEvidence `json:"reviews"`
+	sourceRepoID int64
+	sourceBranch string
+	targetBranch string
 }
 
 type ReviewEvidence struct {

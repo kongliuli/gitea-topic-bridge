@@ -93,6 +93,8 @@ func (server *Server) topicProblem(writer http.ResponseWriter, request *http.Req
 		responseProblem(writer, http.StatusNotFound, "topic_not_found")
 	case errors.Is(err, errIdempotencyConflict):
 		responseProblem(writer, http.StatusConflict, "idempotency_conflict")
+	case errors.Is(err, errCannotWriteRepo):
+		responseProblem(writer, http.StatusForbidden, "repository_write_denied")
 	default:
 		server.upstreamProblem(writer, request, err)
 	}

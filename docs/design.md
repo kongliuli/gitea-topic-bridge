@@ -15,6 +15,7 @@
 |GET /bridge/api/projects|项目总览、分支保护巡检、最新提交|
 |POST /bridge/api/topics|按组或显式成员建单，支持幂等键|
 |GET /bridge/api/topics/{id}|逐仓只读状态与部分成功摘要|
+|POST /bridge/api/topics/{id}/pulls|确认后逐仓创建或复用 PR，保存逐仓结果|
 |POST /bridge/api/topics/{id}/members/{member}/merge 或 /revert-pr|当前用户确认的单仓操作|
 |POST /internal/hooks/gitea|仅服务间访问；验签入队后返回 202|
 |POST /bridge/api/receipts；GET /bridge/api/receipts/{id}|创建快照、查看、导出 JSON/Markdown|
@@ -25,4 +26,10 @@
 
 配置 Bridge 独立 SQLite 后，`POST /bridge/api/topics` 接收同源 JSON 请求及 `Idempotency-Key`。请求字段为 `project_id`、`topic` 和可选的 `members`；省略 `members` 表示使用整组，显式指定时每项填写 `repository_id`，可同时填写 `source_branch` 和 `target_branch`。建单时每个成员仓都必须在项目白名单内，且创建者有读取权限。建单不创建分支或 PR。
 
-首次保存返回 `201`，同用户重试相同请求返回原联调单（`200`）；同用户用同一个键提交不同内容返回 `409`。`GET /bridge/api/topics/{id}` 返回固定成员、版本、建单人和即时查询结果；任一成员不再可访问时，整张单返回与不存在相同的 `404`。这些接口当前只创建版本 1，逐仓写入及操作结果更新仍待实现。
+首次保存返回 `201`，同用户重试相同请求返回原联调单（`200`）；同用户用同一个键提交不同内容返回 `409`。`GET /bridge/api/topics/{id}` 返回固定成员、版本、建单人和即时查询结果；任一成员不再可访问时，整张单返回与不存在相同的 `404`。
+
+### 同仓分支建 PR
+
+显式开启后，`POST /bridge/api/topics/{id}/pulls` 接收同源 JSON `{"confirm":true,"member_ids":[1,2]}`，一次选 1–8 个已填写源、目标分支的成员。当前只支持同一成员仓里的两个分支；跨 Fork 提交仍待实现。不可写、镜像或归档仓不会提交，当前请求以 `write_denied` 返回不可写成员 ID，不覆盖已有操作结果。
+
+处理前按仓 ID、分支组合和 Topic 查找已有 PR。成功时记录关联的 PR 编号，失败按仓记录，联调单版本随结果变更递增。Gitea 明确拒绝时，可以修复后重试。发请求前先写入“结果待核对”；超时、断线或重启后，用户重试只回查 Gitea，不再发创建请求。若仍无法确认，保持待核对，先在 Gitea 人工检查。不会自动合并、推送分支或申请审批。

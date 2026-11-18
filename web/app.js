@@ -6,6 +6,7 @@ const message = document.querySelector('#message');
 const results = document.querySelector('#results');
 const save = document.querySelector('#save-topic');
 const savedTopic = document.querySelector('#saved-topic');
+const createPulls = document.querySelector('#create-pulls');
 const submit = form.querySelector('button');
 const project = form.elements.namedItem('project_id');
 const topic = form.elements.namedItem('topic');
@@ -15,7 +16,9 @@ const checks = { success: '已报告的检查通过', pending: '等待中', warn
 const conflicts = { none_reported: '未报告冲突', not_mergeable_reason_unknown: 'Gitea 暂不可合并，原因未知', not_applicable: '不适用' };
 let activeQuery;
 let storeEnabled = false;
+let writesEnabled = false;
 let draft;
+let savedBatch;
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -30,15 +33,12 @@ function requireLogin() {
   logout.hidden = true;
   form.hidden = true;
   account.textContent = '';
-  draft = undefined;
-  save.hidden = true;
-  savedTopic.replaceChildren();
-  savedTopic.hidden = true;
+  clearSavedTopic();
   results.replaceChildren();
   message.textContent = '先登录 Gitea，再查看你有权限的仓库。';
 }
 
-function showResults(data) {
+function showResults(data, decorate) {
   results.replaceChildren();
   if (!data.complete) {
     message.textContent = '查询未完成。下面只列出已读到的结果。';
@@ -65,8 +65,20 @@ function showResults(data) {
       line.append(element('p', `正式评审：${reviews} · 读取于 ${new Date(pull.read_at).toLocaleString()}`));
       card.append(line);
     }
+    decorate?.(card, repo);
     results.append(card);
   }
+}
+
+function inputRow(parent, name, type, value = '') {
+  const label = element('label', name);
+  const control = document.createElement('input');
+  control.type = type;
+  control.value = value;
+  if (type === 'text') control.maxLength = 200;
+  label.append(control);
+  parent.append(label);
+  return control;
 }
 
 async function lookup() {
@@ -89,11 +101,23 @@ async function lookup() {
     if (!response.ok) throw new Error('lookup failed');
     const data = await response.json();
     if (!query.signal.aborted) {
-      showResults(data);
+      const picked = [];
+      showResults(data, (card, repo) => {
+        if (!writesEnabled) return;
+        const choices = element('fieldset', '');
+        choices.append(element('legend', '保存联调单时使用'));
+        const included = inputRow(choices, '纳入此仓', 'checkbox');
+        included.checked = true;
+        const source = inputRow(choices, '源分支（可留空）', 'text');
+        const target = inputRow(choices, '目标分支（可留空）', 'text');
+        picked.push({ repo, included, source, target });
+        card.append(choices);
+      });
       if (storeEnabled && data.repositories.length) {
         draft = {
-          key: crypto.randomUUID(),
-          body: JSON.stringify({ project_id: params.get('project_id'), topic: params.get('topic'), members: data.repositories.map((item) => ({ repository_id: item.repository.id })) }),
+          params,
+          picked,
+          repos: data.repositories.map((item) => ({ repository_id: item.repository.id })),
         };
         save.disabled = false;
         save.hidden = false;
@@ -108,7 +132,9 @@ async function lookup() {
 
 function clearSavedTopic() {
   draft = undefined;
+  savedBatch = undefined;
   save.hidden = true;
+  createPulls.hidden = true;
   savedTopic.hidden = true;
   savedTopic.replaceChildren();
 }
@@ -116,8 +142,22 @@ function clearSavedTopic() {
 save.addEventListener('click', async () => {
   const submitted = draft;
   if (!submitted) return;
-  save.disabled = true;
+  const members = writesEnabled ? submitted.picked.filter((item) => item.included.checked).map((item) => ({
+    repository_id: item.repo.id,
+    source_branch: item.source.value.trim(),
+    target_branch: item.target.value.trim(),
+  })) : submitted.repos;
   savedTopic.hidden = false;
+  if (!members.length || members.some((member) => Boolean(member.source_branch) !== Boolean(member.target_branch))) {
+    savedTopic.textContent = '至少选一个仓库。源分支和目标分支请同时填写，或同时留空。';
+    return;
+  }
+  const body = JSON.stringify({ project_id: submitted.params.get('project_id'), topic: submitted.params.get('topic'), members });
+  if (submitted.body !== body) {
+    submitted.body = body;
+    submitted.key = crypto.randomUUID();
+  }
+  save.disabled = true;
   savedTopic.textContent = '正在保存…';
   try {
     const response = await fetch('/bridge/api/topics', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': submitted.key }, body: submitted.body });
@@ -125,6 +165,10 @@ save.addEventListener('click', async () => {
     if (response.status === 401) return requireLogin();
     if (response.status === 404) {
       savedTopic.textContent = '仓库权限可能已变化，请重新查询后再保存。';
+      return;
+    }
+    if (response.status === 400) {
+      savedTopic.textContent = '请检查联调单输入。源分支与目标分支不能相同，分支名不能含空格。';
       return;
     }
     if (!response.ok) throw new Error('save failed');
@@ -142,7 +186,7 @@ save.addEventListener('click', async () => {
   }
 });
 
-async function openSavedTopic(id) {
+async function openSavedTopic(id, note = '') {
   clearSavedTopic();
   activeQuery?.abort();
   const query = new AbortController();
@@ -159,15 +203,64 @@ async function openSavedTopic(id) {
     const data = await response.json();
     if (query.signal.aborted) return;
     const repos = data.repositories;
-    showResults({ repositories: repos, complete: repos.every((item) => item.status === 'complete'), found: repos.some((item) => item.pull_requests.length), read_at: data.read_at });
+    const memberByRepo = new Map(data.members.map((member) => [member.repository_id, member]));
+    const selected = [];
+    const operationStates = { pending: '待提交', linked: '已关联 PR', failed: '提交失败', unconfirmed: '结果待核对（重试只回查）' };
+    const reasons = { created: '已新建', existing: '复用已有 PR', branches_in_use: '该分支组合已有其他 PR', scan_incomplete: '没有查完现有 PR', precheck_failed: '提交前检查失败', needs_reconciliation: 'Gitea 尚未确认', gitea_rejected: 'Gitea 拒绝，请检查分支和改动', write_denied: 'Gitea 未允许写入', login_required: '需要重新登录' };
+    showResults({ repositories: repos, complete: repos.every((item) => item.status === 'complete'), found: repos.some((item) => item.pull_requests.length), read_at: data.read_at }, (card, repo) => {
+      const member = memberByRepo.get(repo.id);
+      if (!member?.source_branch || !member.target_branch) return;
+      const status = [operationStates[member.state] ?? '未知', reasons[member.result_code]].filter(Boolean).join(' · ');
+      card.append(element('p', `${member.source_branch} → ${member.target_branch} · ${status}`));
+      if (member.pull_number) {
+        card.append(element('p', `已关联 #${member.pull_number}`));
+      } else if (writesEnabled) {
+        const include = inputRow(card, member.state === 'unconfirmed' ? '仅核对此仓的 PR' : '选中此仓建 PR', 'checkbox');
+        selected.push({ include, member });
+      }
+    });
+    savedBatch = { id, selected };
+    createPulls.disabled = false;
+    createPulls.hidden = !selected.length;
     savedTopic.hidden = false;
-    savedTopic.textContent = `联调单 ${data.topic} · v${data.version} · ${data.members.length} 个成员仓`;
+    savedTopic.textContent = `联调单 ${data.topic} · v${data.version} · 已关联 ${data.members.filter((member) => member.pull_number).length}/${data.members.length} 仓${note ? ' · ' + note : ''}`;
     topic.value = data.topic;
     project.value = data.project_id;
   } catch {
     if (!query.signal.aborted) message.textContent = '暂时读不到保存的联调单。';
   }
 }
+
+createPulls.addEventListener('click', async () => {
+  const batch = savedBatch;
+  if (!batch) return;
+  const selected = batch.selected.filter((item) => item.include.checked);
+  if (selected.length < 1 || selected.length > 8) {
+    message.textContent = '每次请选择 1 到 8 个仓库。';
+    return;
+  }
+  if (!window.confirm(`用你的 Gitea 账号处理选中的 ${selected.length} 个仓库？只建或复用 PR，不合并代码。`)) return;
+  createPulls.disabled = true;
+  message.textContent = '正在逐仓处理…';
+  try {
+    const response = await fetch(`/bridge/api/topics/${encodeURIComponent(batch.id)}/pulls`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true, member_ids: selected.map((item) => item.member.id) }),
+    });
+    if (savedBatch !== batch) return;
+    if (response.status === 401) return requireLogin();
+    if (!response.ok) throw new Error('create pulls failed');
+    const updated = await response.json();
+    if (savedBatch !== batch) return;
+    await openSavedTopic(batch.id, updated.write_denied.length ? `${updated.write_denied.length} 仓不允许你写入` : '已刷新逐仓结果');
+  } catch {
+    if (savedBatch !== batch) return;
+    await openSavedTopic(batch.id, '未收到完整确认，请先看各仓已保存的结果');
+  } finally {
+    if (savedBatch === batch) createPulls.disabled = false;
+  }
+});
 
 form.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -192,6 +285,7 @@ async function loadProjects() {
     const data = await response.json();
     account.textContent = `当前账号：${data.user}`;
     storeEnabled = data.saved_topics;
+    writesEnabled = data.pull_creation;
     logout.hidden = false;
     const params = new URLSearchParams(location.search);
     const saved = storeEnabled && /^[A-Za-z0-9_-]{43}$/.test(params.get('topic_id') ?? '') ? params.get('topic_id') : null;

@@ -28,11 +28,15 @@ type TopicChangeSet struct {
 }
 
 type TopicMember struct {
-	ID           int64  `json:"id"`
-	RepositoryID int64  `json:"repository_id"`
-	SourceBranch string `json:"source_branch,omitempty"`
-	TargetBranch string `json:"target_branch,omitempty"`
-	State        string `json:"state"`
+	ID           int64      `json:"id"`
+	RepositoryID int64      `json:"repository_id"`
+	SourceBranch string     `json:"source_branch,omitempty"`
+	TargetBranch string     `json:"target_branch,omitempty"`
+	State        string     `json:"state"`
+	PullNumber   int64      `json:"pull_number,omitempty"`
+	ResultCode   string     `json:"result_code,omitempty"`
+	ActorID      int64      `json:"actor_id,omitempty"`
+	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
 }
 
 func OpenTopicStore(ctx context.Context, path string) (*TopicStore, error) {
@@ -108,12 +112,23 @@ PRAGMA application_id=0x47544252;
 PRAGMA user_version=1;`); err != nil {
 			return err
 		}
-	case 1:
-		if applicationID != bridgeApplicationID {
+		fallthrough
+	case 1, 2:
+		if version != 0 && applicationID != bridgeApplicationID {
 			return errors.New("database is not owned by Bridge")
 		}
 	default:
 		return fmt.Errorf("unsupported Bridge database version %d", version)
+	}
+	if version < 2 {
+		if _, err := tx.ExecContext(ctx, `
+ALTER TABLE topic_members ADD COLUMN pull_number INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE topic_members ADD COLUMN result_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE topic_members ADD COLUMN actor_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE topic_members ADD COLUMN updated_at_ns INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version=2;`); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -145,15 +160,20 @@ func readTopic(ctx context.Context, reader topicReader, filter string, args ...a
 		return TopicChangeSet{}, "", err
 	}
 	topic.CreatedAt = time.Unix(0, nanos).UTC()
-	rows, err := reader.QueryContext(ctx, `SELECT id, repo_id, source_branch, target_branch, state FROM topic_members WHERE topic_id = ? ORDER BY id`, topic.ID)
+	rows, err := reader.QueryContext(ctx, `SELECT id, repo_id, source_branch, target_branch, state, pull_number, result_code, actor_id, updated_at_ns FROM topic_members WHERE topic_id = ? ORDER BY id`, topic.ID)
 	if err != nil {
 		return TopicChangeSet{}, "", err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var member TopicMember
-		if err := rows.Scan(&member.ID, &member.RepositoryID, &member.SourceBranch, &member.TargetBranch, &member.State); err != nil {
+		var updated int64
+		if err := rows.Scan(&member.ID, &member.RepositoryID, &member.SourceBranch, &member.TargetBranch, &member.State, &member.PullNumber, &member.ResultCode, &member.ActorID, &updated); err != nil {
 			return TopicChangeSet{}, "", err
+		}
+		if updated != 0 {
+			value := time.Unix(0, updated).UTC()
+			member.UpdatedAt = &value
 		}
 		topic.Members = append(topic.Members, member)
 	}
@@ -167,12 +187,55 @@ func readTopic(ctx context.Context, reader topicReader, filter string, args ...a
 }
 
 func (store *TopicStore) get(ctx context.Context, id string) (TopicChangeSet, error) {
-	topic, _, err := readTopic(ctx, store.db, ` WHERE id = ?`, id)
+	topic, _, err := store.read(ctx, ` WHERE id = ?`, id)
 	return topic, err
 }
 
 func (store *TopicStore) findRequest(ctx context.Context, actorID int64, key string) (TopicChangeSet, string, error) {
-	return readTopic(ctx, store.db, ` WHERE creator_id = ? AND request_key = ?`, actorID, key)
+	return store.read(ctx, ` WHERE creator_id = ? AND request_key = ?`, actorID, key)
+}
+
+func (store *TopicStore) read(ctx context.Context, filter string, args ...any) (TopicChangeSet, string, error) {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TopicChangeSet{}, "", err
+	}
+	defer tx.Rollback()
+	return readTopic(ctx, tx, filter, args...)
+}
+
+func (store *TopicStore) updateMember(ctx context.Context, topicID string, member *TopicMember, state, code string, number, actorID int64) (bool, error) {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var previous int64
+	if member.UpdatedAt != nil {
+		previous = member.UpdatedAt.UnixNano()
+	}
+	now := time.Now().UTC()
+	if now.UnixNano() <= previous {
+		now = time.Unix(0, previous+1).UTC()
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE topic_members
+SET state=?, result_code=?, pull_number=?, actor_id=?, updated_at_ns=?
+WHERE id=? AND topic_id=? AND state=? AND updated_at_ns=?`, state, code, number, actorID, now.UnixNano(), member.ID, topicID, member.State, previous)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count != 1 {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE topic_changesets SET version=version+1 WHERE id=?`, topicID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	member.State, member.ResultCode, member.PullNumber, member.ActorID, member.UpdatedAt = state, code, number, actorID, &now
+	return true, nil
 }
 
 func (store *TopicStore) create(ctx context.Context, topic TopicChangeSet, key, hash string) (TopicChangeSet, bool, error) {

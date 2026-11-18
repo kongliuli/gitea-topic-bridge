@@ -50,7 +50,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	}
 	ownerToken, _ := createUser("labowner", "all", "--admin")
 	readerToken, readerPassword := createUser("labreader", "read:repository,read:user")
-	reviewerToken, _ := createUser("labreviewer", "write:repository,read:user")
+	reviewerToken, reviewerPassword := createUser("labreviewer", "write:repository,read:user")
 	api := func(method, path string, data, out any, status int) {
 		t.Helper()
 		labAPI(t, base, ownerToken, method, path, data, out, status)
@@ -64,11 +64,16 @@ func TestGiteaLocalLab(t *testing.T) {
 			api("PUT", "/repos/labowner/"+name+"/collaborators/labreader", map[string]string{"permission": "read"}, nil, 204)
 		}
 	}
-	seedPull := func(repo, branch, title, body string) int64 {
+	seedBranch := func(repo, branch string) {
 		t.Helper()
 		prefix := "/repos/labowner/" + repo
 		api("POST", prefix+"/branches", map[string]string{"new_branch_name": branch, "old_branch_name": "main"}, nil, 201)
 		api("POST", prefix+"/contents/"+branch+".txt", map[string]string{"branch": branch, "message": "Synthetic fixture", "content": base64.StdEncoding.EncodeToString([]byte("test\n"))}, nil, 201)
+	}
+	seedPull := func(repo, branch, title, body string) int64 {
+		t.Helper()
+		seedBranch(repo, branch)
+		prefix := "/repos/labowner/" + repo
 		var pull struct{ Number int64 }
 		api("POST", prefix+"/pulls", map[string]string{"title": title, "body": body, "base": "main", "head": branch}, &pull, 201)
 		return pull.Number
@@ -113,7 +118,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	}
 	api("PUT", "/repos/labowner/conflict/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
 	labAPI(t, base, reviewerToken, "POST", fmt.Sprintf("/repos/labowner/conflict/pulls/%d/reviews", approved), map[string]string{"event": "APPROVED", "body": "Synthetic verified review"}, nil, 200)
-	browser, bridgeURL := loginLab(t, base, ownerToken, readerPassword, repos)
+	browser, bridgeURL := loginLab(t, base, ownerToken, "labreader", readerPassword, repos)
 	lookupURL := bridgeURL + "/bridge/api/topics/lookup?project_id=lab&topic=CAD-01"
 	data := loadLabPage(t, browser, lookupURL, nil, 200)
 	if !strings.Contains(data, `"name":"conflict"`) || !strings.Contains(data, `"lifecycle":"merged"`) || strings.Contains(data, `"name":"hidden"`) {
@@ -152,6 +157,30 @@ func TestGiteaLocalLab(t *testing.T) {
 	if data := loadLabPage(t, browser, savedURL, nil, 200); !strings.Contains(data, `"name":"conflict"`) || strings.Contains(data, `"name":"merged"`) {
 		t.Fatal("saved topic did not preserve the specific repository selection")
 	}
+	readerAttempt := postLabTopic(t, browser, savedURL+"/pulls", bridgeURL, "", fmt.Sprintf(`{"confirm":true,"member_ids":[%d]}`, saved.Members[0].ID), 200)
+	if readerAttempt.Members[0].State != "pending" {
+		t.Fatal("read-only user changed the saved operation")
+	}
+	api("PUT", "/repos/labowner/no-match/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
+	api("PUT", "/repos/labowner/merged/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
+	seedBranch("no-match", "bridge-source")
+	writer, writerURL := loginLab(t, base, ownerToken, "labreviewer", reviewerPassword, repos)
+	writeSelection := fmt.Sprintf(`{"project_id":"lab","topic":"CAD-01","members":[
+{"repository_id":%d,"source_branch":"missing","target_branch":"main"},
+{"repository_id":%d,"source_branch":"changes","target_branch":"main"},
+{"repository_id":%d,"source_branch":"bridge-source","target_branch":"main"}]}`, repos[0].ID, repos[1].ID, repos[2].ID)
+	batchTopic := postLabTopic(t, writer, writerURL+"/bridge/api/topics", writerURL, "batch", writeSelection, 201)
+	batchURL := writerURL + "/bridge/api/topics/" + batchTopic.ID + "/pulls"
+	confirmation := fmt.Sprintf(`{"confirm":true,"member_ids":[%d,%d,%d]}`, batchTopic.Members[0].ID, batchTopic.Members[1].ID, batchTopic.Members[2].ID)
+	postLabTopic(t, writer, batchURL, writerURL, "", strings.Replace(confirmation, "true", "false", 1), 400)
+	batch := postLabTopic(t, writer, batchURL, writerURL, "", confirmation, 200)
+	if batch.Members[0].ResultCode != "gitea_rejected" || batch.Members[1].PullNumber != conflicting || batch.Members[1].ResultCode != "existing" || batch.Members[2].ResultCode != "created" || batch.Members[2].PullNumber <= 0 {
+		t.Fatalf("expected independent rejected, reused and created results: %+v", batch.Members)
+	}
+	repeatBatch := postLabTopic(t, writer, batchURL, writerURL, "", confirmation, 200)
+	if repeatBatch.Members[2].PullNumber != batch.Members[2].PullNumber || repeatBatch.Members[2].ResultCode != "created" {
+		t.Fatal("a retry changed an already successful repository")
+	}
 	api("DELETE", "/repos/labowner/conflict/collaborators/labreader", nil, nil, 204)
 	results = lookup(3)
 	if len(results) != 2 || results[1].Repository.Name != "no-match" {
@@ -180,7 +209,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	loadLabPage(t, browser, lookupURL, nil, 401)
 }
 
-func loginLab(t *testing.T, giteaURL, ownerToken, readerPassword string, repos []Repository) (*http.Client, string) {
+func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, repos []Repository) (*http.Client, string) {
 	t.Helper()
 	store, err := OpenTopicStore(context.Background(), filepath.Join(t.TempDir(), "bridge.db"))
 	if err != nil {
@@ -198,8 +227,8 @@ func loginLab(t *testing.T, giteaURL, ownerToken, readerPassword string, repos [
 	}, &creds, 201)
 	handler, err := NewServer(ServerConfig{PublicBaseURL: bridgeURL + "/bridge/", GiteaPublicURL: giteaURL, GiteaAPIURL: giteaURL,
 		ClientID: creds.ID, ClientSecret: creds.Secret, AllowLoopbackHTTP: true, PageSize: 1, MaxPages: 3,
-		TopicStore: store,
-		Projects:   []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
+		TopicStore: store, EnablePullCreation: true,
+		Projects: []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
 	})
 	if err != nil {
 		app.Listener.Close()
@@ -215,7 +244,7 @@ func loginLab(t *testing.T, giteaURL, ownerToken, readerPassword string, repos [
 	browser := &http.Client{Jar: jar, Timeout: 15 * time.Second}
 	loginURL := giteaURL + "/user/login"
 	page := loadLabPage(t, browser, loginURL, nil, 200)
-	loginForm := url.Values{"user_name": {"labreader"}, "password": {readerPassword}}
+	loginForm := url.Values{"user_name": {username}, "password": {password}}
 	addLabCSRF(page, loginForm)
 	loadLabPage(t, browser, loginURL, loginForm, 200)
 	consent := loadLabPage(t, browser, bridgeURL+"/bridge/auth/login?topic=CAD-01&project_id=lab", nil, 200)
@@ -237,7 +266,7 @@ func loginLab(t *testing.T, giteaURL, ownerToken, readerPassword string, repos [
 	if dashboard := loadLabPage(t, browser, giteaURL+"/login/oauth/grant", values, 200); !strings.Contains(dashboard, "/bridge/app.js") {
 		t.Fatal("OAuth consent did not return to the Bridge page")
 	}
-	if projects := loadLabPage(t, browser, bridgeURL+"/bridge/api/projects", nil, 200); !strings.Contains(projects, `"user":"labreader"`) || strings.Contains(projects, "Secret") {
+	if projects := loadLabPage(t, browser, bridgeURL+"/bridge/api/projects", nil, 200); !strings.Contains(projects, fmt.Sprintf(`"user":%q`, username)) || strings.Contains(projects, "Secret") {
 		t.Fatal("OAuth session used the wrong user or exposed a hidden project")
 	}
 	return browser, bridgeURL

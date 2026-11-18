@@ -156,10 +156,8 @@ func (client *Gitea) readPage(ctx context.Context, repo Repository, page, limit 
 		Number             int64 `json:"number"`
 		Title, Body, State string
 		Merged             bool
-		Head               struct{ SHA string }
-		Base               struct {
-			RepoID int64 `json:"repo_id"`
-		}
+		Head               apiPullBranch
+		Base               apiPullBranch
 	}
 	headers, err := client.get(ctx, endpoint, &rows)
 	if err != nil {
@@ -194,7 +192,8 @@ func (client *Gitea) readPage(ctx context.Context, repo Repository, page, limit 
 		}
 		result.PullRequests = append(result.PullRequests, PullRequest{Number: row.Number, Title: row.Title, Body: row.Body,
 			Lifecycle: lifecycle, HeadSHA: row.Head.SHA,
-			URL: client.publicBase.JoinPath(repo.Owner, repo.Name, "pulls", strconv.FormatInt(row.Number, 10)).String(),
+			URL:          client.publicBase.JoinPath(repo.Owner, repo.Name, "pulls", strconv.FormatInt(row.Number, 10)).String(),
+			sourceRepoID: row.Head.RepoID, sourceBranch: row.Head.Label, targetBranch: row.Base.Ref,
 		})
 	}
 	return result, nil
