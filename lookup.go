@@ -15,18 +15,18 @@ var (
 )
 
 type Repository struct {
-	ID    int64
-	Name  string
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
 	Owner string `json:"owner"`
 }
 
 type PullRequest struct {
-	Number    int64
-	Title     string
+	Number    int64  `json:"number"`
+	Title     string `json:"title"`
 	Body      string `json:"-"`
-	Lifecycle string
-	HeadSHA   string
-	URL       string
+	Lifecycle string `json:"lifecycle"`
+	HeadSHA   string `json:"head_sha"`
+	URL       string `json:"url"`
 }
 
 type Page struct {
@@ -40,9 +40,9 @@ type Source interface {
 }
 
 type RepositoryResult struct {
-	Repository   Repository
-	Status       string
-	PullRequests []PullRequest
+	Repository   Repository    `json:"repository"`
+	Status       string        `json:"status"`
+	PullRequests []PullRequest `json:"pull_requests"`
 }
 
 func Lookup(ctx context.Context, source Source, repositories []Repository, topic string, maxPages int) ([]RepositoryResult, error) {
@@ -67,10 +67,13 @@ func Lookup(ctx context.Context, source Source, repositories []Repository, topic
 			}
 			return nil, errors.New("cannot verify repository permissions")
 		}
-		if !visible {
-			continue
+		if visible {
+			results = append(results, RepositoryResult{Repository: repo, Status: "incomplete", PullRequests: make([]PullRequest, 0)})
 		}
-		result := RepositoryResult{Repository: repo, Status: "incomplete", PullRequests: make([]PullRequest, 0)}
+	}
+	filtered := results[:0]
+	for _, result := range results {
+		repo := result.Repository
 		seenPRs := make(map[int64]bool)
 		for pageNumber := 1; pageNumber <= maxPages && ctx.Err() == nil; pageNumber++ {
 			page, err := source.PullRequests(ctx, repo, pageNumber)
@@ -100,8 +103,8 @@ func Lookup(ctx context.Context, source Source, repositories []Repository, topic
 			}
 		}
 		if result.Status != "hidden" {
-			results = append(results, result)
+			filtered = append(filtered, result)
 		}
 	}
-	return results, nil
+	return filtered, nil
 }

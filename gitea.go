@@ -49,10 +49,31 @@ func NewGitea(apiBase, publicBase, token string, pageSize int) (*Gitea, error) {
 	if token == "" || pageSize < 1 || pageSize > 100 {
 		return nil, errors.New("invalid token or page size")
 	}
-	return &Gitea{apiBase: internal, publicBase: public, token: token, pageSize: pageSize, http: &http.Client{
+	return &Gitea{apiBase: internal, publicBase: public, token: token, pageSize: pageSize, http: newUpstreamClient()}, nil
+}
+
+func newUpstreamClient() *http.Client {
+	return &http.Client{
 		Timeout:       10 * time.Second,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
-	}}, nil
+	}
+}
+
+func (client *Gitea) CurrentUser(ctx context.Context) (string, error) {
+	var user struct {
+		ID    int64
+		Login string
+	}
+	if _, err := client.get(ctx, client.apiBase.JoinPath("api", "v1", "user"), &user); err != nil {
+		if errors.Is(err, ErrNotVisible) {
+			return "", ErrUnauthorized
+		}
+		return "", err
+	}
+	if user.ID <= 0 || user.Login == "" {
+		return "", ErrUnauthorized
+	}
+	return user.Login, nil
 }
 
 func (client *Gitea) get(ctx context.Context, endpoint *url.URL, value any) (http.Header, error) {
