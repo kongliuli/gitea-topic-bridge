@@ -203,12 +203,20 @@ try {
         $state = Get-LabService $serviceName
         $delayed = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName").DelayedAutoStart
         $recovery = (& $sc qfailure $serviceName) -join [Environment]::NewLine
-        if ($state.State -ne 'Stopped' -or $state.StartName -ne $entry.Credential.UserName -or $state.StartMode -ne 'Auto' -or $delayed -ne 1 -or
+        $startName = $state.StartName -replace '^\.\\', "$env:COMPUTERNAME\"
+        $actualSID = [Security.Principal.NTAccount]::new($startName).Translate([Security.Principal.SecurityIdentifier])
+        $expectedSID = [Security.Principal.NTAccount]::new($entry.Credential.UserName).Translate([Security.Principal.SecurityIdentifier])
+        if ($state.State -ne 'Stopped' -or $actualSID -ne $expectedSID -or $state.StartMode -ne 'Auto' -or $delayed -ne 1 -or
             $recovery -notmatch '\b5000\b' -or $recovery -notmatch '\b30000\b' -or $recovery -notmatch '\b120000\b') {
-            throw "Unexpected account, delayed start or recovery policy on $serviceName."
+            throw "Unexpected SCM configuration for ${serviceName}: state $($state.State), identity $($state.StartName), mode $($state.StartMode), delayed $delayed. $recovery"
         }
-        Start-Service -Name $serviceName
-        $null = Wait-LabService $serviceName
+        try {
+            Start-Service -Name $serviceName
+            $null = Wait-LabService $serviceName
+        } catch {
+            if (Test-Path -LiteralPath $entry.LogFile) { Get-Content -LiteralPath $entry.LogFile -Tail 10 | Write-Host }
+            throw
+        }
     }
     Assert-LabStatus "$bridgeUrl/bridge/" 200
     Assert-LabStatus "$bridgeUrl/bridge/api/projects" 401
