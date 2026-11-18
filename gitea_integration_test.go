@@ -652,6 +652,13 @@ func startLocalGitea(t *testing.T, binary, webhookAddress string, extraSettings 
 
 func startLocalGiteaForPublicURL(t *testing.T, binary, webhookAddress, publicURL string, extraSettings ...string) (string, func(...string) *exec.Cmd) {
 	t.Helper()
+	base, command := prepareLocalGitea(t, binary, webhookAddress, publicURL, extraSettings...)
+	launchLocalGitea(t, base, command("web"))
+	return base, command
+}
+
+func prepareLocalGitea(t *testing.T, binary, webhookAddress, publicURL string, extraSettings ...string) (string, func(...string) *exec.Cmd) {
+	t.Helper()
 	root := t.TempDir()
 	override := filepath.Join(root, "custom", "templates", "custom")
 	if err := os.MkdirAll(override, 0700); err != nil {
@@ -706,7 +713,11 @@ LEVEL = warn
 	if err := os.WriteFile(config, []byte(settings+strings.Join(extraSettings, "\n")), 0600); err != nil {
 		t.Fatal(err)
 	}
-	command := func(args ...string) *exec.Cmd {
+	return base, labGiteaCommand(binary, root, config)
+}
+
+func labGiteaCommand(binary, root, config string) func(...string) *exec.Cmd {
+	return func(args ...string) *exec.Cmd {
 		cmd := exec.Command(binary, append([]string{"--work-path", root, "--config", config}, args...)...)
 		cmd.Dir = root
 		for _, variable := range os.Environ() {
@@ -716,18 +727,28 @@ LEVEL = warn
 		}
 		return cmd
 	}
-	output, err := os.Create(filepath.Join(root, "gitea.log"))
+}
+
+func launchLocalGitea(t *testing.T, base string, server *exec.Cmd) (done <-chan struct{}, result func() error) {
+	t.Helper()
+	path := filepath.Join(server.Dir, "gitea.log")
+	output, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := command("web")
 	server.Stdout, server.Stderr = output, output
 	if err := server.Start(); err != nil {
 		output.Close()
 		t.Fatal(err)
 	}
 	output.Close()
-	t.Cleanup(func() { server.Process.Kill(); server.Wait() })
+	finished := make(chan struct{})
+	var exitError error
+	go func() {
+		exitError = server.Wait()
+		close(finished)
+	}()
+	t.Cleanup(func() { server.Process.Kill(); <-finished })
 	httpClient := &http.Client{Timeout: time.Second}
 	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
@@ -735,14 +756,20 @@ LEVEL = warn
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return base, command
+				return finished, func() error { <-finished; return exitError }
 			}
+		}
+		select {
+		case <-finished:
+			logOutput, _ := os.ReadFile(path)
+			t.Fatalf("local Gitea exited before readiness: %v\n%s", exitError, logOutput)
+		default:
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	logOutput, _ := os.ReadFile(filepath.Join(root, "gitea.log"))
+	logOutput, _ := os.ReadFile(path)
 	t.Fatalf("local Gitea did not become ready: %s", logOutput)
-	return "", nil
+	return nil, nil
 }
 
 func labAPI(t *testing.T, base, token, method, path string, data, out any, status int) {
