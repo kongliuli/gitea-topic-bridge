@@ -1,7 +1,9 @@
 git.office.example:8443 {
     tls internal
     @private path /internal /internal/*
-    respond @private 404
+    handle @private {
+        respond 404
+    }
     redir /bridge /bridge/ 308
     handle /bridge/* {
         reverse_proxy 127.0.0.1:3001

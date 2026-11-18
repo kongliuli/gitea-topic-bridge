@@ -15,8 +15,19 @@ import (
 func labGit(t *testing.T, dir, origin, user, password string, args ...string) (string, error) {
 	t.Helper()
 	endpoint, err := url.Parse(origin)
-	if err != nil || endpoint.Scheme != "http" || endpoint.Hostname() != "127.0.0.1" || endpoint.User != nil {
+	if err != nil || endpoint.User != nil {
 		t.Fatal("Git fixture must use an isolated loopback Gitea")
+	}
+	switch endpoint.Scheme {
+	case "http":
+		if endpoint.Hostname() != "127.0.0.1" {
+			t.Fatal("HTTP fixture host must be loopback")
+		}
+	case "https":
+		resolution := endpoint.Host + ":127.0.0.1"
+		args = append([]string{"-c", "http.curloptResolve=" + resolution}, args...)
+	default:
+		t.Fatal("unexpected Git fixture protocol")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

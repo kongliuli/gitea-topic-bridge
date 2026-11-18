@@ -74,6 +74,18 @@ go test -v -timeout 3m -run '^TestGiteaPullMirrorLab$' -count=1 ./...
 
 本地 Gitea v28.4.0 在临时自定义模板目录加载示例，仅增加「多仓联调」和「交付回执」两条链接。HTTP 测试确认实际首页各渲染一次并指向正确路径。此项没有覆盖真实网关跨路径点击或生产 OAuth 回跳。
 
+## 已验证：HTTPS 网关回环演练
+
+使用 Windows amd64 的 Gitea v28.4.0 和 Caddy v2.11.9，在临时目录分别以 `git.office.example:随机端口` 和 `127.0.0.1:随机端口` 运行网关配置。验证 Gitea 首页菜单、普通账号 OAuth 回到原联调查询、Secure 会话、Bridge 提交链接和 Gitea 克隆地址都使用规范入口。用同一普通账号成功克隆私有仓，`/internal/hooks/gitea` 由网关直接返回 `404`。
+
+测试只在客户端进程内信任临时 CA。Windows Git 保留证书链和主机名校验，因该临时 CA 没有吊销端点，单条克隆命令关闭 Schannel 吊销检查。没有修改 Windows 信任库或 Git 全局配置。实际办公网 DNS、公网域名证书、跨主机访问、tailnet 与防火墙仍须在部署环境验证。Caddy 二进制来自 [v2.11.9 发布包](https://github.com/caddyserver/caddy/releases/tag/v2.11.9)，Windows amd64 ZIP 的 SHA-256 为 `ad93112d335ee687100c4c9f11bced16ca590377976b7fe7883882b9e797e472`。
+
+```powershell
+$env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
+$env:BRIDGE_TEST_CADDY_BINARY = 'C:\path\to\caddy.exe'
+go test -v -timeout 3m -run '^TestGiteaGatewayTLS$' -count=1 ./...
+```
+
 ## 已验证：Windows 服务模式的本地测试
 
 Windows 构建和测试验证 SCM 处理器的启动、询问、停止、关机及失败状态，回环 HTTP 监听在取消时释放端口，后台任务完成后才退出；占用任一个端口不会报告就绪。注册脚本两个模式都通过 `-WhatIf` 检查，未改变当前主机服务。当前会话没有管理员权限，未做真实 SCM 注册、专用账号 ACL、故障恢复或主机重启。部署验收须另在隔离测试机使用管理员会话完成。

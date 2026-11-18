@@ -9,9 +9,11 @@ Gitea、Go Bridge、Caddy 分别作为 Windows 服务运行。Bridge 原生支�
 |IP:端口|`https://192.0.2.10:8443/bridge/`|替换文档 IP，证书 SAN 包含实际 IP，防火墙限源|
 |Tailscale|`https://git-host.example-tailnet.ts.net:8443/bridge/`|实际 MagicDNS 全名，Serve 终止 TLS，tailnet grants 限制成员，不开 Funnel|
 
-每个实例选一个规范入口：Gitea `ROOT_URL`、Bridge `PUBLIC_BASE_URL`、OAuth 回调与克隆地址保持一致。多网共用优先选同一域名配分区 DNS；其他别名只有在规范地址可达时才跳转，且别名本身也需要有效证书。不从 Host 头动态生成登录回调。
+每个实例选一个规范入口。设定 Gitea `[server]` 的 `ROOT_URL` 和 `PUBLIC_URL_DETECTION = never`，并让 Bridge `public_base_url`、OAuth 回调与克隆地址使用同一入口。Gitea `LOCAL_ROOT_URL` 可单独设为内部回环地址。这样内网 API 请求也会得到规范克隆地址。多网共用优先选同一域名配分区 DNS；其他别名只有在规范地址可达时才跳转，且别名本身也需要有效证书。
 
 后端仅绑定 127.0.0.1:3000、127.0.0.1:3001，默认 Git over HTTPS。示例网关用于内网 DNS；Tailscale Serve 模式改为 HTTP 回环网关 127.0.0.1:8080，由 Serve 转发至它，仅在 tailnet 暴露 HTTPS 端口。外部网关不转发内部 webhook，不从转发头推断身份。
+
+使用 [Caddyfile](../examples/Caddyfile) 时，内网 DNS 把站点名换成实际内网域名，终端信任该内部 CA。IP 入口把站点名换成实际 IP 和端口，证书 SAN 必须包含该 IP。使用外部域名证书时，按签发方式配置自动 HTTPS 或提供证书与私钥路径。用 Windows Git 实测克隆，客户端还须能访问企业 CA 所需的吊销信息。路由配置保留 `handle @private`，使内部路径先由网关拦下。
 
 Bridge 用 Gitea OAuth2 授权码、PKCE 与 state。固定回调 `/bridge/auth/callback`，令牌只保存在服务端；会话 Cookie 使用 Secure、HttpOnly、SameSite=Lax，写请求验证 CSRF。复用已有 Gitea 登录，不复制 Gitea 会话密钥；首次可能要求授权。
 

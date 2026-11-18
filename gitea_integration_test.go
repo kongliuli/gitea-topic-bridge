@@ -531,6 +531,16 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 		t.Fatal(err)
 	}
 	browser := &http.Client{Jar: jar, Timeout: 15 * time.Second}
+	authorizeLabBrowser(t, browser, giteaURL, bridgeURL, username, password)
+	if projects := loadLabPage(t, browser, bridgeURL+"/bridge/api/projects", nil, 200); !strings.Contains(projects, fmt.Sprintf(`"user":%q`, username)) ||
+		strings.Contains(projects, `"id":"secret"`) != (username == "labowner") {
+		t.Fatal("OAuth session used the wrong user or exposed a hidden project")
+	}
+	return browser, bridgeURL
+}
+
+func authorizeLabBrowser(t *testing.T, browser *http.Client, giteaURL, bridgeURL, username, password string) {
+	t.Helper()
 	loginURL := giteaURL + "/user/login"
 	page := loadLabPage(t, browser, loginURL, nil, 200)
 	loginForm := url.Values{"user_name": {username}, "password": {password}}
@@ -555,11 +565,6 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 	if dashboard := loadLabPage(t, browser, giteaURL+"/login/oauth/grant", values, 200); !strings.Contains(dashboard, "/bridge/app.js") {
 		t.Fatal("OAuth consent did not return to the Bridge page")
 	}
-	if projects := loadLabPage(t, browser, bridgeURL+"/bridge/api/projects", nil, 200); !strings.Contains(projects, fmt.Sprintf(`"user":%q`, username)) ||
-		strings.Contains(projects, `"id":"secret"`) != (username == "labowner") {
-		t.Fatal("OAuth session used the wrong user or exposed a hidden project")
-	}
-	return browser, bridgeURL
 }
 
 func postLabTopic(t *testing.T, browser *http.Client, address, origin, key, body string, status int) TopicChangeSet {
@@ -642,6 +647,11 @@ func createLabUser(t *testing.T, command func(...string) *exec.Cmd, name, scopes
 
 func startLocalGitea(t *testing.T, binary, webhookAddress string, extraSettings ...string) (string, func(...string) *exec.Cmd) {
 	t.Helper()
+	return startLocalGiteaForPublicURL(t, binary, webhookAddress, "", extraSettings...)
+}
+
+func startLocalGiteaForPublicURL(t *testing.T, binary, webhookAddress, publicURL string, extraSettings ...string) (string, func(...string) *exec.Cmd) {
+	t.Helper()
 	root := t.TempDir()
 	override := filepath.Join(root, "custom", "templates", "custom")
 	if err := os.MkdirAll(override, 0700); err != nil {
@@ -661,11 +671,16 @@ func startLocalGitea(t *testing.T, binary, webhookAddress string, extraSettings 
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if publicURL == "" {
+		publicURL = base
+	}
 	config := filepath.Join(root, "app.ini")
 	settings := fmt.Sprintf(`[server]
 HTTP_ADDR = 127.0.0.1
 HTTP_PORT = %d
 ROOT_URL = %s/
+PUBLIC_URL_DETECTION = never
+LOCAL_ROOT_URL = %s/
 DISABLE_SSH = true
 SSH_ROOT_PATH = %s/ssh
 SSH_CREATE_AUTHORIZED_KEYS_FILE = false
@@ -687,7 +702,7 @@ ENABLED = false
 [log]
 MODE = console
 LEVEL = warn
-`, port, base, filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root), webhookAddress)
+`, port, publicURL, base, filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root), webhookAddress)
 	if err := os.WriteFile(config, []byte(settings+strings.Join(extraSettings, "\n")), 0600); err != nil {
 		t.Fatal(err)
 	}
