@@ -99,6 +99,41 @@ type scmReceiptEvidence struct {
 }
 
 func TestSCMHostedStackAfterRestart(t *testing.T) {
+	verifySCMStoredState(t)
+	t.Log("Restarted all four SCM services; fresh OAuth, original topic, private Git ref and PR, byte-identical receipt and proof, and independent Anchor replay passed.")
+}
+
+func TestSCMHostedStackAfterRestore(t *testing.T) {
+	fixture, before := verifySCMStoredState(t)
+	const pilot = "/repos/labowner/pilot"
+	var main struct {
+		Protected         bool
+		RequiredApprovals int `json:"required_approvals"`
+	}
+	labAPI(t, fixture.GiteaAPI, fixture.DeveloperToken, http.MethodGet, pilot+"/branches/main", nil, &main, 200)
+	if !main.Protected || main.RequiredApprovals != 1 {
+		t.Fatal("restored Gitea lost the pilot's main branch protection")
+	}
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"clone", "--single-branch", "--branch", "pilot-check", fixture.Gateway + "/labowner/pilot.git", "."},
+		{"push", "origin", "HEAD:refs/heads/restore-proof"},
+	} {
+		output, err := fixture.git(t, dir, "labdeveloper", fixture.DeveloperPassword, args...)
+		if err != nil {
+			t.Fatalf("Git %s through the restored service gateway: %v\n%s", args[0], err, output)
+		}
+	}
+	var branch struct{ Commit struct{ ID string } }
+	labAPI(t, fixture.GiteaAPI, fixture.DeveloperToken, http.MethodGet, pilot+"/branches/restore-proof", nil, &branch, 200)
+	if branch.Commit.ID != before.PilotHead {
+		t.Fatal("restored Gitea did not record the authorized push to the new branch")
+	}
+	t.Log("Cold restore verified original OAuth, topic, Git ref, protected pilot and PR, identical receipt and proof, the independent ledger, and an authorized push.")
+}
+
+func verifySCMStoredState(t *testing.T) (scmStackFixture, scmRestartEvidence) {
+	t.Helper()
 	fixture, evidencePath := loadSCMFixture(t)
 	raw, err := os.ReadFile(evidencePath)
 	if err != nil {
@@ -106,11 +141,11 @@ func TestSCMHostedStackAfterRestart(t *testing.T) {
 	}
 	var before scmRestartEvidence
 	if err := json.Unmarshal(raw, &before); err != nil {
-		t.Fatal("invalid pre-restart evidence")
+		t.Fatal("invalid original SCM evidence")
 	}
 	browser := fixture.browser(t)
 	public := fixture.Gateway
-	waitForLabProcess(t, "the restarted HTTPS gateway and Bridge", func() bool {
+	waitForLabProcess(t, "the HTTPS gateway and Bridge", func() bool {
 		return labCaddyReady(browser, public+"/") && labCaddyReady(browser, public+"/bridge/")
 	})
 	loadLabPage(t, browser, public+"/bridge/api/projects", nil, 401)
@@ -121,11 +156,11 @@ func TestSCMHostedStackAfterRestart(t *testing.T) {
 		batch.ID != before.TopicID || batch.Topic != "CAD-SCM" || batch.ProjectID != "lab" ||
 		batch.Version != before.TopicVersion || len(batch.Members) != 1 ||
 		batch.Members[0].ID != before.MemberID || batch.Members[0].RepositoryID != fixture.RepositoryID {
-		t.Fatalf("the saved topic changed across the SCM restart: %v", err)
+		t.Fatalf("the saved topic did not match the original: %v", err)
 	}
 	pull := lookupSCMPilot(t, browser, fixture)
 	if pull.Number != before.PilotNumber || pull.HeadSHA != before.PilotHead {
-		t.Fatal("the imported repository's PR changed across the SCM restart")
+		t.Fatal("the imported repository's PR did not match the original")
 	}
 	pilotGit := public + "/labowner/pilot.git"
 	const pilotRef = "refs/heads/pilot-check"
@@ -137,13 +172,13 @@ func TestSCMHostedStackAfterRestart(t *testing.T) {
 	receipt := []byte(loadLabPage(t, browser, receiptURL+"?format=json", nil, 200))
 	proof := []byte(loadLabPage(t, browser, receiptURL+"?format=proof", nil, 200))
 	if sha256.Sum256(receipt) != before.Receipt.Receipt || sha256.Sum256(proof) != before.Receipt.Proof {
-		t.Fatal("the signed receipt or its detached proof changed across the SCM restart")
+		t.Fatal("the signed receipt or its detached proof did not match the original")
 	}
 	if err := VerifyReceiptAnchor(receipt, proof, before.Receipt.IssuerKey, fixture.AnchorPublicKey); err != nil {
-		t.Fatalf("the original keys could not verify the restarted stack's receipt and proof: %v", err)
+		t.Fatalf("the original keys could not verify the receipt and proof: %v", err)
 	}
 	verifySCMAnchorReplay(t, fixture, before.Receipt)
-	t.Log("Restarted all four SCM services; fresh OAuth, original topic, private Git ref and PR, byte-identical receipt and proof, and independent Anchor replay passed.")
+	return fixture, before
 }
 
 type scmStackFixture struct {
@@ -156,6 +191,7 @@ type scmStackFixture struct {
 	OwnerToken            string `json:"owner_token"`
 	OwnerPassword         string `json:"owner_password"`
 	DeveloperToken        string `json:"developer_token"`
+	DeveloperPassword     string `json:"developer_password"`
 	PilotID               int64  `json:"pilot_id"`
 }
 

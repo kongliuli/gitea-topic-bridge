@@ -160,6 +160,12 @@ function Assert-LabStatus([string]$Url, [int]$Expected) {
     if ([int]$response.StatusCode -ne $Expected) { throw "Expected HTTP $Expected at $Url, got $($response.StatusCode)." }
 }
 
+function Copy-LabFiles([string]$Source, [string]$Destination, [string[]]$Names) {
+    foreach ($name in $Names) {
+        Copy-Item -LiteralPath (Join-Path $Source $name) -Destination $Destination -Recurse -Force
+    }
+}
+
 function Start-CheckedBridgeService([hashtable]$Registration) {
     & $register @Registration
     $serviceName = $Registration.Name
@@ -427,13 +433,14 @@ LEVEL = warn
 
     $env:BRIDGE_TEST_SCM_STACK = Join-Path $clientRoot 'client fixture.json'
     $caPath = Join-Path $caddyRoot 'storage/pki/authorities/local/root.crt'
-    @{
+    $clientFixture = @{
         gateway = $gatewayUrl; ca = $caPath
         repository_id = $repo.id; password = $reader.Password; anchor_public_key = $anchorKey.Groups[1].Value
         anchor_url = "$anchorUrl/v1/anchors"; anchor_bearer = $anchorBearer
         gitea_api = $giteaUrl; owner_token = $owner.Token; owner_password = $owner.Password
-        developer_token = $developer.Token; pilot_id = $pilot.id
-    } | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
+        developer_token = $developer.Token; developer_password = $developer.Password; pilot_id = $pilot.id
+    }
+    $clientFixture | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
     & go test -v -timeout 2m -run '^TestSCMHostedStack$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted stack did not pass HTTPS acceptance.' }
 
@@ -453,7 +460,129 @@ LEVEL = warn
     Write-Host 'All four services started again with new processes and the original Caddy CA.'
     & go test -v -timeout 2m -run '^TestSCMHostedStackAfterRestart$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The restarted SCM stack did not retain its original data.' }
+
+    $restoreListeners = @((New-LabListener), (New-LabListener), (New-LabListener))
+    try {
+        $restoredGiteaPort, $restoredBridgePort, $restoredAnchorPort = $restoreListeners | ForEach-Object { $_.LocalEndpoint.Port }
+    } finally {
+        $restoreListeners | ForEach-Object { $_.Stop() }
+    }
     Stop-LabStack $startOrder $listenPorts
+
+    $giteaDatabase = Join-Path $giteaRoot 'data/gitea.db'
+    foreach ($sidecar in '-wal','-shm','-journal') {
+        if (Test-Path -LiteralPath ($giteaDatabase + $sidecar)) { throw 'Gitea left SQLite sidecars after shutdown.' }
+    }
+    $bridgeDatabase = Join-Path $bridgeRoot 'bridge.sqlite3'
+    $sourcePaths = @($giteaDatabase, $bridgeDatabase, $anchorRegistration.AnchorDatabase, $caPath)
+    $originalHashes = Get-FileHash -LiteralPath $sourcePaths
+
+    $backupRoot = Join-Path $root 'backup'
+    $restoreRoot = Join-Path $root 'restored'
+    New-Item -ItemType Directory -Path $backupRoot,$restoreRoot | Out-Null
+    Set-LabDirectoryAcl $backupRoot @{}
+    $parts = @(
+        @{ Name='gitea'; Source=$giteaRoot; Files=@('app.ini','repos','data','custom'); Permissions=@{ $giteaSID = 'Modify' } }
+        @{ Name='caddy'; Source=$caddyRoot; Files=@('Caddyfile','storage'); Permissions=@{ $caddySID = 'Modify' } }
+        @{ Name='bridge-config'; Source=$bridgeSettings; Files=@('bridge config.json','bridge secrets.json'); Permissions=@{ $bridgeSID = 'ReadAndExecute' } }
+        @{ Name='anchor-config'; Source=$anchorSettings; Files=@('anchor secrets.json'); Permissions=@{ $anchorSID = 'ReadAndExecute' } }
+        @{ Name='inbox'; Source=$inbox; Files=@([string]$repo.id); Permissions=@{ $bridgeSID = 'ReadAndExecute' } }
+        @{ Name='bridge'; Permissions=@{ $bridgeSID = 'Modify' } }
+        @{ Name='anchor'; Permissions=@{ $anchorSID = 'Modify' } }
+    )
+    foreach ($part in $parts) {
+        $backupPart = Join-Path $backupRoot $part.Name
+        $restoredPart = Join-Path $restoreRoot $part.Name
+        New-Item -ItemType Directory -Path $backupPart,$restoredPart | Out-Null
+        Set-LabDirectoryAcl $restoredPart $part.Permissions
+        if ($part.Files) {
+            Copy-LabFiles $part.Source $backupPart $part.Files
+            Copy-LabFiles $backupPart $restoredPart $part.Files
+        }
+    }
+
+    $copy = Join-Path $PSScriptRoot '../examples/Copy-StoppedDatabase.ps1'
+    & $copy -Database $bridgeDatabase -Snapshots $snapshots -Destination (Join-Path $backupRoot 'bridge')
+    & $copy -Database $anchorRegistration.AnchorDatabase -Destination (Join-Path $backupRoot 'anchor')
+    & $copy -Database (Join-Path $backupRoot 'bridge/state.sqlite3') -Snapshots (Join-Path $backupRoot 'bridge/snapshots') -Destination (Join-Path $restoreRoot 'bridge')
+    & $copy -Database (Join-Path $backupRoot 'anchor/state.sqlite3') -Destination (Join-Path $restoreRoot 'anchor')
+
+    $restoredBridgeDatabase = Join-Path $restoreRoot 'bridge/state.sqlite3'
+    $restoredSnapshots = Join-Path $restoreRoot 'bridge/snapshots'
+    $restoredAnchorDatabase = Join-Path $restoreRoot 'anchor/state.sqlite3'
+    $evidence = Get-Content -Raw -LiteralPath (Join-Path $clientRoot 'restart-evidence.json') | ConvertFrom-Json
+    $report = & $app -audit-restored-db $restoredBridgeDatabase -audit-snapshots $restoredSnapshots `
+        -trusted-receipt-key $evidence.Receipt.IssuerKey -trusted-anchor-key $anchorKey.Groups[1].Value -audit-anchor-db $restoredAnchorDatabase
+    if ($LASTEXITCODE -ne 0) { throw 'The offline audit could not verify the restored copies.' }
+    $audit = $report | ConvertFrom-Json
+    if ($audit.topics -ne 1 -or $audit.receipts -ne 1 -or $audit.artifacts -ne 1 -or
+        $audit.verified_anchors -ne 1 -or $audit.pending_anchors -ne 0 -or $audit.unanchored_receipts -ne 0) {
+        throw "Unexpected restored audit counts: $report"
+    }
+    Write-Host "Restored database, snapshot and independent ledger passed the offline audit: $report"
+
+    $restoredGiteaRoot = Join-Path $restoreRoot 'gitea'
+    $restoredGiteaIni = Join-Path $restoredGiteaRoot 'app.ini'
+    $restoredGiteaUrl = "http://127.0.0.1:$restoredGiteaPort"
+    (Get-Content -Raw -LiteralPath $restoredGiteaIni).Replace($giteaPath, $restoredGiteaRoot.Replace('\','/')).
+        Replace("HTTP_PORT = $giteaPort", "HTTP_PORT = $restoredGiteaPort").Replace($giteaUrl, $restoredGiteaUrl) |
+        Set-Content -LiteralPath $restoredGiteaIni -Encoding utf8NoBOM
+    & $giteaApp --work-path $restoredGiteaRoot --config $restoredGiteaIni admin regenerate hooks
+    if ($LASTEXITCODE -ne 0) { throw 'Could not regenerate Git hooks for the restored Gitea.' }
+
+    $restoredGiteaService = "GiteaRestore$suffix"
+    Start-LabUpstream $restoredGiteaService ('"{0}" --work-path "{1}" --config "{2}" web' -f $giteaApp,$restoredGiteaRoot,$restoredGiteaIni) $gitea.Credential
+    Wait-LabGitea $restoredGiteaUrl (Join-Path $restoredGiteaRoot 'log/gitea.log')
+    $restoredAnchorUrl = "http://127.0.0.1:$restoredAnchorPort/v1/anchors"
+    $restoredAnchor = @{
+        Name = "AnchorRestore$suffix"; Executable = $app; AnchorDatabase = $restoredAnchorDatabase
+        Secrets = Join-Path $restoreRoot 'anchor-config/anchor secrets.json'; LogFile = Join-Path $restoreRoot 'anchor/anchor.log'
+        Listen = "127.0.0.1:$restoredAnchorPort"; Credential = $anchor.Credential
+    }
+    Start-CheckedBridgeService $restoredAnchor
+    $restoredBridge = @{
+        Name = "BridgeRestore$suffix"; Executable = $app; Config = Join-Path $restoreRoot 'bridge-config/bridge config.json'
+        Secrets = Join-Path $restoreRoot 'bridge-config/bridge secrets.json'; LogFile = Join-Path $restoreRoot 'bridge/bridge.log'
+        Listen = "127.0.0.1:$restoredBridgePort"; Credential = $bridge.Credential
+    }
+    $settings = Get-Content -Raw -LiteralPath $restoredBridge.Config | ConvertFrom-Json
+    $settings.gitea_api_url = "$restoredGiteaUrl/"
+    $settings.database_path = $restoredBridgeDatabase
+    $settings.receipts.artifact_root = Join-Path $restoreRoot 'inbox'
+    $settings.receipts.snapshot_root = $restoredSnapshots
+    $settings.receipts.anchor.url = $restoredAnchorUrl
+    $settings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $restoredBridge.Config -Encoding utf8NoBOM
+    Start-CheckedBridgeService $restoredBridge
+    Assert-LabAccess $bridge.Credential $restoredAnchorDatabase $false
+    Assert-LabAccess $bridge.Credential (Join-Path $restoreRoot 'gitea/data/gitea.db') $false
+    $restoredArtifact = Join-Path $settings.receipts.artifact_root (Join-Path ([string]$repo.id) 'artifact.txt')
+    Assert-LabAccess $bridge.Credential $restoredArtifact $true
+    Assert-LabAccess $bridge.Credential $restoredArtifact $false 'Write'
+
+    $restoredCaddyRoot = Join-Path $restoreRoot 'caddy'
+    $restoredCaddyConfig = Join-Path $restoredCaddyRoot 'Caddyfile'
+    (Get-Content -Raw -LiteralPath $restoredCaddyConfig).Replace($caddyPath, $restoredCaddyRoot.Replace('\','/')).
+        Replace("127.0.0.1:$giteaPort", "127.0.0.1:$restoredGiteaPort").Replace($bridgeListen, $restoredBridge.Listen) |
+        Set-Content -LiteralPath $restoredCaddyConfig -Encoding utf8NoBOM
+    $restoredCaddyService = "CaddyRestore$suffix"
+    Start-LabUpstream $restoredCaddyService ('"{0}" run --config "{1}" --adapter caddyfile' -f $caddyApp,$restoredCaddyConfig) $caddy.Credential
+    $clientFixture.ca = Join-Path $restoredCaddyRoot 'storage/pki/authorities/local/root.crt'
+    if ((Get-FileHash -LiteralPath $clientFixture.ca).Hash -ne $caHash) { throw 'The restored gateway CA differs from the original.' }
+    $clientFixture.gitea_api = $restoredGiteaUrl
+    $clientFixture.anchor_url = $restoredAnchorUrl
+    $env:BRIDGE_TEST_SCM_STACK = Join-Path $clientRoot 'restored client fixture.json'
+    $clientFixture | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
+    & go test -v -timeout 2m -run '^TestSCMHostedStackAfterRestore$' -count=1 .
+    if ($LASTEXITCODE -ne 0) { throw 'The restored SCM stack did not pass end-to-end acceptance.' }
+
+    $restoreStartOrder = @($restoredGiteaService, $restoredAnchor.Name, $restoredBridge.Name, $restoredCaddyService)
+    Stop-LabStack $restoreStartOrder @($restoredGiteaPort, $restoredBridgePort, $restoredAnchorPort, $gatewayPort)
+    foreach ($original in $originalHashes) {
+        if ((Get-FileHash -LiteralPath $original.Path).Hash -ne $original.Hash) {
+            throw "The cold restore modified the source file $($original.Path)."
+        }
+    }
+    Write-Host 'Restored all four services from backup into new directories; the stopped source databases and CA were unchanged.'
 } finally {
     foreach ($serviceName in $services) {
         Stop-Service -Name $serviceName -ErrorAction SilentlyContinue
