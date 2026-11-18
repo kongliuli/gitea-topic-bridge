@@ -115,7 +115,7 @@ PRAGMA user_version=1;`); err != nil {
 			return err
 		}
 		fallthrough
-	case 1, 2, 3, 4:
+	case 1, 2, 3, 4, 5:
 		if version != 0 && applicationID != bridgeApplicationID {
 			return errors.New("database is not owned by Bridge")
 		}
@@ -166,6 +166,26 @@ CREATE TABLE pull_reverts (
     PRIMARY KEY (repo_id, original_pull, merge_sha)
 ) STRICT;
 PRAGMA user_version=4;`); err != nil {
+			return err
+		}
+	}
+	if version < 5 {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE webhook_inbox (
+    delivery_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('pull_request', 'release')),
+    repo_id INTEGER NOT NULL CHECK(repo_id > 0),
+    object_id INTEGER NOT NULL CHECK(object_id > 0),
+    body_sha TEXT NOT NULL,
+    received_at_ns INTEGER NOT NULL,
+    available_at_ns INTEGER NOT NULL,
+    lease TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    observation TEXT
+) STRICT;
+CREATE INDEX webhook_ready ON webhook_inbox(available_at_ns, received_at_ns) WHERE observation IS NULL;
+PRAGMA user_version=5;`); err != nil {
 			return err
 		}
 	}

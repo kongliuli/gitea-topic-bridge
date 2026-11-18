@@ -30,7 +30,9 @@ func TestGiteaLocalLab(t *testing.T) {
 	if !filepath.IsAbs(binary) {
 		t.Fatal("BRIDGE_TEST_GITEA_BINARY must be an absolute path")
 	}
-	base, command := startLocalGitea(t, binary)
+	internal := httptest.NewUnstartedServer(nil)
+	t.Cleanup(internal.Close)
+	base, command := startLocalGitea(t, binary, internal.Listener.Addr().String())
 	createUser := func(name, scopes string, opts ...string) (string, string) {
 		t.Helper()
 		args := []string{"admin", "user", "create", "--username", name, "--email", name + "@example.invalid", "--random-password", "--must-change-password=false", "--access-token", "--access-token-name", "bridge-lab", "--access-token-scopes", scopes}
@@ -64,6 +66,29 @@ func TestGiteaLocalLab(t *testing.T) {
 			api("PUT", "/repos/labowner/"+name+"/collaborators/labreader", map[string]string{"permission": "read"}, nil, 204)
 		}
 	}
+	hookStore, err := OpenTopicStore(context.Background(), filepath.Join(t.TempDir(), "webhooks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hookStore.Close() })
+	secret, err := randomID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := NewWebhook(ServerConfig{TopicStore: hookStore, Projects: []Project{{Repositories: repos}}, GiteaAPIURL: base, GiteaPublicURL: base}, secret, readerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	internal.Config.Handler = hook.Handler()
+	internal.Start()
+	hookCtx, stopHook := context.WithCancel(context.Background())
+	doneHook := make(chan struct{})
+	go func() { defer close(doneHook); hook.Run(hookCtx) }()
+	t.Cleanup(func() { stopHook(); <-doneHook })
+	api("POST", "/repos/labowner/merged/hooks", map[string]any{
+		"type": "gitea", "active": true, "events": []string{"pull_request", "release"},
+		"config": map[string]string{"url": internal.URL + "/internal/hooks/gitea", "content_type": "json", "secret": secret},
+	}, nil, 201)
 	seedBranch := func(repo, branch string) {
 		t.Helper()
 		prefix := "/repos/labowner/" + repo
@@ -80,6 +105,15 @@ func TestGiteaLocalLab(t *testing.T) {
 	}
 	merged := seedPull("merged", "complete", "[Topic: CAD-01] Merged fixture", "")
 	api("POST", fmt.Sprintf("/repos/labowner/merged/pulls/%d/merge", merged), map[string]string{"Do": "merge"}, nil, 200)
+	var actualMerge struct {
+		SHA string `json:"merge_commit_sha"`
+	}
+	api("GET", fmt.Sprintf("/repos/labowner/merged/pulls/%d", merged), nil, &actualMerge, 200)
+	api("POST", "/repos/labowner/merged/tags", map[string]string{
+		"tag_name": "build/v1", "tag_message": "Annotated fixture", "target": actualMerge.SHA,
+	}, nil, 201)
+	var release struct{ ID int64 }
+	api("POST", "/repos/labowner/merged/releases", map[string]string{"tag_name": "build/v1", "name": "Fixture release"}, &release, 201)
 	conflicting := seedPull("conflict", "changes", "Open fixture", "[Topic: CAD-01]")
 	api("POST", "/repos/labowner/conflict/contents/changes.txt", map[string]string{"branch": "main", "message": "Conflicting fixture", "content": "b3RoZXIK"}, nil, 201)
 	approved := seedPull("conflict", "followup", "[Topic: CAD-01] Second fixture", "")
@@ -340,6 +374,32 @@ func TestGiteaLocalLab(t *testing.T) {
 		t.Fatalf("logout returned %d", logoutResponse.StatusCode)
 	}
 	loadLabPage(t, browser, lookupURL, nil, 401)
+	checkHookLab(t, hookStore, "pull_request", repos[0].ID, merged, actualMerge.SHA, "")
+	checkHookLab(t, hookStore, "release", repos[0].ID, release.ID, actualMerge.SHA, "build/v1")
+}
+
+func checkHookLab(t *testing.T, store *TopicStore, kind string, repoID, objectID int64, sha, tag string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var snapshot string
+		err := store.db.QueryRow(`
+SELECT observation FROM webhook_inbox
+WHERE kind=? AND repo_id=? AND object_id=? AND json_extract(observation, '$.commit_sha')=? AND
+json_extract(observation, '$.status') IN ('merged', 'published') LIMIT 1`, kind, repoID, objectID, sha).Scan(&snapshot)
+		if err == nil {
+			var result sourceObservation
+			if json.Unmarshal([]byte(snapshot), &result) != nil || result.ActorID <= 0 || result.OccurredAt == nil || result.Tag != tag || result.Repository.ID != repoID {
+				t.Fatalf("invalid %s evidence", kind)
+			}
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	var jobs int
+	var failure string
+	store.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(last_error), '') FROM webhook_inbox WHERE kind=?`, kind).Scan(&jobs, &failure)
+	t.Fatalf("Gitea %s callback not verified: %d queued; last error %q", kind, jobs, failure)
 }
 
 func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, repos []Repository) (*http.Client, string) {
@@ -468,7 +528,7 @@ func loadLabPage(t *testing.T, browser *http.Client, address string, form url.Va
 	return string(data)
 }
 
-func startLocalGitea(t *testing.T, binary string) (string, func(...string) *exec.Cmd) {
+func startLocalGitea(t *testing.T, binary, webhookAddress string) (string, func(...string) *exec.Cmd) {
 	t.Helper()
 	root := t.TempDir()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -493,6 +553,7 @@ PATH = %s/data/gitea.db
 ROOT = %s/repos
 [security]
 INSTALL_LOCK = true
+ALLOWED_HOST_LIST = %s
 [service]
 DISABLE_REGISTRATION = true
 [actions]
@@ -500,7 +561,7 @@ ENABLED = false
 [log]
 MODE = console
 LEVEL = warn
-`, port, base, filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root))
+`, port, base, filepath.ToSlash(root), filepath.ToSlash(root), filepath.ToSlash(root), webhookAddress)
 	if err := os.WriteFile(config, []byte(settings), 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,12 @@ Bridge 用 Gitea OAuth2 授权码、PKCE 与 state。固定回调 `/bridge/auth/
 3. 使用 Go 1.26 或以上版本，在仓库目录执行 `go build -o bridge.exe ./cmd/bridge`。从安全的启动环境设置 `BRIDGE_OAUTH_CLIENT_SECRET`，再执行 `.\bridge.exe -config C:\path\to\bridge.json`。默认监听 `127.0.0.1:3001`，通过网关访问 `/bridge/`。不要把密钥写进配置或提交到 Git。
 4. 当前以前台进程运行。会话只保留在内存，最长一小时，进程重启须重新登录。`allow_loopback_http` 仅用于隔离实验，非回环 HTTP 不允许。
 
+### 内部 Webhook
+
+启用时，在已有 Bridge 数据库配置下添加 `-hook-listen 127.0.0.1:3002`。启动环境提供两个独立密钥：`BRIDGE_WEBHOOK_SECRET`（至少 32 字节的随机共享密钥）及 `BRIDGE_WEBHOOK_READER_TOKEN`（专用非管理员账号，只授予白名单仓的读取权限，令牌只给 `read:repository`）。两者都不得进入 Git、日志或浏览器。内部回调必须直连 `http://127.0.0.1:3002/internal/hooks/gitea`；不监听公网，不交给 Caddy 或 Tailscale 转发。
+
+在对应仓配置 Gitea 类型的 JSON Webhook，选择 PR 和 Release 事件，填写相同的签名密钥。在 Gitea 的 `[security]` 出站允许列表中增加准确的 `127.0.0.1:3002`，不要为了回调打开全部内网地址。查看 Gitea 投递日志确认收到 `202`；这是持久入队，不是回执签发。遇到 `503` 须从投递历史重试，并检查 Bridge 日志、磁盘及只读账号权限。
+
 ## 运维约束
 
 先确认 github443 是 HTTP 代理还是 SSH 别名，分别配置服务账号的出站代理或 SSH 配置，不能混用。校验证书或主机密钥；Webhook 出站仅放行指定 Bridge 地址。不要修改机器全局代理。
