@@ -126,6 +126,10 @@ $env:BRIDGE_TEST_CADDY_BINARY = 'C:\path\to\caddy.exe'
 go test -v -run '^TestCaddyTailnetLoopback$' -count=1 ./...
 ```
 
+## 已验证：客户端入口验收脚本
+
+在 Windows 上用真实 Caddy 和隔离上游，运行 [客户端探针](../examples/Test-BridgeIngress.ps1)。可信 CA 的 HTTPS 入口通过，移除信任就失败。模拟放开后端或错误开放拒绝入口时，探针输出失败项并以非零状态退出。关闭连接的回环地址用于模拟拒绝，实际办公网和 tailnet 的网络限制须从对应客户端采证。运行方法见[部署说明](deployment.md#从客户端检查入口)。
+
 ## 已验证：Windows 服务模式的本地测试
 
 Windows 构建和测试验证 SCM 处理器的启动、询问、停止、关机及失败状态，回环 HTTP 监听在取消时释放端口，后台任务完成后才退出；占用任一个端口不会报告就绪。注册脚本两个模式都通过 `-WhatIf` 检查，未改变当前主机服务。当前会话没有管理员权限，未做真实 SCM 注册、专用账号 ACL、故障恢复或主机重启。部署验收须另在隔离测试机使用管理员会话完成。

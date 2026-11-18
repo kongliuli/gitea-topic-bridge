@@ -28,6 +28,24 @@ tailscale serve status
 
 从另一台已授权的 tailnet 客户端核对登录回跳、证书、页面链接与 Git 克隆。在拒绝访问的客户端确认无法连接该入口，并核对 `3000`、`3001`、`8080` 都没有对网络开放。此模式使用 Serve。参见 [Tailscale Serve 官方文档](https://tailscale.com/docs/reference/tailscale-cli/serve)。
 
+### 从客户端检查入口
+
+在不同网络的测试客户端使用 PowerShell 7.4 或以上版本运行 [Test-BridgeIngress.ps1](../examples/Test-BridgeIngress.ps1)。先从已授权客户端验证入口在线，记录其实际入口 IP，再从需要拒绝的客户端测试同一入口 IP。将样例域名和 IP 替换为该客户端实际应连接的入口和后端主机地址。检查多个 IP 时传入数组。后端端口与部署配置一致，启用 Webhook 时加 `3002`，使用 Tailscale 回环网关时加 `8080`。
+
+```powershell
+# 在授权客户端执行
+.\examples\Test-BridgeIngress.ps1 -BridgeUrl 'https://git.office.example:8443/bridge/' `
+  -ExpectedAccess Allowed -SourceLabel 'office-allowed' -BackendAddress '192.0.2.10' `
+  -BackendPorts 3000,3001,3002 > ingress-office.json
+
+# 在拒绝访问的客户端执行。入口 IP 由前面的授权测试确认。
+.\examples\Test-BridgeIngress.ps1 -BridgeUrl 'https://git.office.example:8443/bridge/' `
+  -ExpectedAccess Denied -SourceLabel 'guest-denied' -IngressAddress '192.0.2.10' `
+  -BackendAddress '192.0.2.10' -BackendPorts 3000,3001,3002 > ingress-guest.json
+```
+
+授权模式直连规范 HTTPS 入口，检查证书和三个状态码。它对内部 Webhook 发一个无签名、空请求体的探针，预期由网关返回 `404`。拒绝模式直接检查所给入口 IP 的 TCP 连通性，避免把 DNS 或证书错误当成访问限制。两种模式都检查列出的后端端口，逐项写出 JSON，失败时以非零状态退出。默认使用客户端系统信任库。隔离实验可用 `-TrustedCAFile` 提供当前探针专用的 PEM CA，继续验证证书链和主机名。OAuth 回跳、私有仓 Git 克隆和实际客户端的吊销检查仍需分别操作核对。
+
 ## 启动看板
 
 1. 在 Gitea 注册机密 OAuth2 应用。回调须完整匹配网关地址，例如 `https://git.office.example:8443/bridge/auth/callback`。默认申请 `read:user` 和 `read:repository`，不需要管理员令牌。`enable_pull_creation`、`enable_merge`、`enable_revert` 独立开关、默认关闭；开启任一个都需要 Bridge 数据库和重新登录授权 `write:repository`。这是 Gitea 的仓库级写权限，不是仅限 PR。只在需要写操作的实例启用。
