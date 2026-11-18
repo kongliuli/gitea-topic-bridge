@@ -43,6 +43,11 @@ jobs:
           curl.exe --fail --silent --show-error --location --retry 3 --max-time 120 -o $caddyZip 'https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_windows_amd64.zip'
           if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $caddyZip).Hash -ne 'ad93112d335ee687100c4c9f11bced16ca590377976b7fe7883882b9e797e472') { throw 'Caddy asset failed verification.' }
           Expand-Archive -LiteralPath $caddyZip -DestinationPath "$env:RUNNER_TEMP\caddy-scm-lab"
+      - name: Exercise staged migration and rollback
+        shell: pwsh
+        run: |
+          $env:BRIDGE_TEST_GITEA_BINARY = "$env:RUNNER_TEMP\gitea-28.4.0.exe"
+          go test -v -count=1 -timeout 2m -run '^TestGiteaPilotMigrationLab$' .
       - name: Exercise Service Control Manager
         shell: pwsh
         run: |
