@@ -19,6 +19,11 @@ type AnchorLedger struct {
 	secretHash [32]byte
 }
 
+const (
+	anchorApplicationID = 0x4754414C
+	anchorSchemaVersion = 1
+)
+
 func OpenAnchorLedger(ctx context.Context, path, seed, bearer string) (*AnchorLedger, error) {
 	key, err := base64.StdEncoding.DecodeString(seed)
 	if err != nil || len(key) != ed25519.SeedSize || !validAnchorBearer(bearer) {
@@ -49,7 +54,6 @@ func (ledger *AnchorLedger) initialize(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	const ledgerID = 0x4754414C
 	var application, version int
 	if err := tx.QueryRowContext(ctx, `PRAGMA application_id`).Scan(&application); err != nil {
 		return err
@@ -87,7 +91,7 @@ PRAGMA user_version = 1;`); err != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO anchor_identity VALUES(?)`, ledger.PublicKey()); err != nil {
 			return err
 		}
-	case application == ledgerID && version == 1:
+	case application == anchorApplicationID && version == anchorSchemaVersion:
 		var public string
 		if err := tx.QueryRowContext(ctx, `SELECT public_key FROM anchor_identity`).Scan(&public); err != nil {
 			return err

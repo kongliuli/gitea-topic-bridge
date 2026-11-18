@@ -90,7 +90,25 @@ func main() {
 	trustedKey := flag.String("trusted-receipt-key", "", "trusted Ed25519 public key (base64) for receipt verification")
 	proof := flag.String("anchor-proof", "", "optional detached independent proof JSON file")
 	trustedAnchorKey := flag.String("trusted-anchor-key", "", "trusted independent Ed25519 public key (base64)")
+	auditDB := flag.String("audit-restored-db", "", "verify a stopped/restored Bridge database without modifying it")
+	auditSnapshots := flag.String("audit-snapshots", "", "absolute path of the restored receipt snapshot directory")
+	auditAnchorDB := flag.String("audit-anchor-db", "", "optional restored independent ledger database for proof comparison")
 	flag.Parse()
+	if *auditDB != "" {
+		if *verify != "" || *serviceName != "" || options.anchorDB != "" {
+			log.Fatal("restore audit is a separate offline command")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		report, err := bridge.AuditRestoredBridge(ctx, *auditDB, *auditSnapshots, *trustedKey, *trustedAnchorKey, *auditAnchorDB)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *verify != "" {
 		if err := verifyReceiptFile(*verify, *trustedKey, *proof, *trustedAnchorKey); err != nil {
 			log.Fatal(err)

@@ -72,4 +72,18 @@ Start-Service -Name GiteaTopicBridge
 
 升级前备份数据库、裸仓、配置、密钥与快照；SQLite 使用在线备份或停写后复制。在副本验证 OAuth、模板、API 与 webhook，数据库迁移后需要连同数据一起回滚。独立扩展不等于永远兼容。
 
+### 停机备份与空目录演练
+
+1. 在低峰暂停签发和写操作，记录 Gitea、Bridge、存证服务版本及公钥指纹。正常停止 Bridge，再正常停止存证服务；确认所有 SQLite 连接已关闭。不要删除残留的 `-wal`、`-shm` 或 `-journal` 来强行备份；若残留，应先在受控条件下恢复数据库并正常关闭，再重试。另安排 Gitea 停机，用 [Gitea 备份与恢复流程](https://docs.gitea.com/administration/backup-and-restore/) 保全业务库、裸仓、LFS/附件、配置和自定义目录；对外部数据库用该数据库的原生备份。单独保全 Caddy 配置及所需证书材料。
+2. 在各自权限边界，用 `examples/Copy-StoppedDatabase.ps1` 复制 Bridge 数据库和快照，以及独立存证账本。目标必须是已建好的、受限 ACL 的空目录；脚本不覆盖已有文件，不复制密钥。受限保存 OAuth、Webhook、签发和存证私钥的对应版本，单独备份服务配置和收件目录。不要将独立账本的备份交给 Bridge 服务账号。
+3. 用同一脚本把每份备份再复制到新的隔离空目录。输出固定为 `state.sqlite3` 及可选的 `snapshots/`。保留生产目录原样；脚本报错时，不要使用部分输出。对带回执的备份，用下面的离线核验命令复验；比对签名版本数、制品数、存证数与备份时的记录。未完成的待存证项不等于已存证。若核对独立账本，需由同时获得两个备份副本的独立验收人员执行，不授予 Bridge 账号账本文件权限。
+
+```powershell
+.\examples\Copy-StoppedDatabase.ps1 -Database 'C:/Bridge/data/bridge.db' -Snapshots 'C:/Bridge/snapshots' -Destination 'D:/Backup/bridge-copy'
+.\examples\Copy-StoppedDatabase.ps1 -Database 'D:/Backup/bridge-copy/state.sqlite3' -Snapshots 'D:/Backup/bridge-copy/snapshots' -Destination 'C:/RestoreLab/bridge'
+.\bridge.exe -audit-restored-db 'C:/RestoreLab/bridge/state.sqlite3' -audit-snapshots 'C:/RestoreLab/bridge/snapshots' -trusted-receipt-key $ReceiptPublicKey -trusted-anchor-key $AnchorPublicKey -audit-anchor-db 'C:/RestoreLab/anchor/state.sqlite3'
+```
+
+在存证权限边界复制及恢复账本时不传 `-Snapshots`。从独立渠道核对公钥后填入对应变量。没有独立存证的实例省略存证相关参数；若数据库带有存证凭证，不能跳过该凭证验签。离线命令只读检查 SQLite、签名版本链、快照字节和可选账本，不启动服务，也不会迁移旧版库。对旧版备份先保留原件，使用对应版本或迁移另一份副本。通过后再用独立端口和恢复目录启动，重新登录测试，检查仓库 ID 和权限未变、收件及回执可用；最后才安排正式切换，保留原仓和切换记录。
+
 参考：[Gitea 配置](https://docs.gitea.com/administration/config-cheat-sheet)、[模板](https://docs.gitea.com/administration/customizing-gitea/)、[Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve)。

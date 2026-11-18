@@ -63,7 +63,7 @@ func TestArtifactCopiesBeforeHashAndDeniesHardLinks(t *testing.T) {
 	}
 }
 
-func verifyReceiptLab(t *testing.T, gitea, ownerToken string, browser *http.Client, bridgeURL, topicID string, repos []Repository, releaseID int64, releasedSHA, mergedSHA string) {
+func verifyReceiptLab(t *testing.T, gitea, ownerToken string, browser *http.Client, bridgeURL, topicID string, repos []Repository, releaseID int64, releasedSHA, mergedSHA string, recovery *receiptRecoveryLab) {
 	t.Helper()
 	keyJSON := loadLabPage(t, browser, bridgeURL+"/bridge/api/receipt-key", nil, 200)
 	var key map[string]string
@@ -145,31 +145,36 @@ func verifyReceiptLab(t *testing.T, gitea, ownerToken string, browser *http.Clie
 		t.Fatal("tampered receipt verified")
 	}
 	url := fmt.Sprintf("%s/bridge/api/receipts/%s", bridgeURL, doc.ID)
-	anchorKey := os.Getenv("BRIDGE_TEST_TRUSTED_ANCHOR_KEY")
+	anchorKey := recovery.anchorKey
 	if anchorKey == "" {
 		t.Fatal("independent test key is unavailable")
 	}
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		response, err := browser.Get(url + "?format=proof")
-		if err != nil {
-			t.Fatal(err)
-		}
-		proof, err := io.ReadAll(io.LimitReader(response.Body, 4096))
-		response.Body.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if response.StatusCode == 200 {
-			if response.Header.Get("X-Bridge-Anchor-Status") != "verified" || VerifyReceiptAnchor(first.raw, proof, key["public_key"], anchorKey) != nil {
-				t.Fatal("anchored receipt failed offline verification")
+	recovery.receiptKey = key["public_key"]
+	for _, receipt := range []response{first, second} {
+		proofURL := fmt.Sprintf("%s/bridge/api/receipts/%s?format=proof", bridgeURL, receipt.document.ID)
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			response, err := browser.Get(proofURL)
+			if err != nil {
+				t.Fatal(err)
 			}
-			break
+			proof, err := io.ReadAll(io.LimitReader(response.Body, 4096))
+			response.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode == 200 {
+				if response.Header.Get("X-Bridge-Anchor-Status") != "verified" || VerifyReceiptAnchor(receipt.raw, proof, key["public_key"], anchorKey) != nil {
+					t.Fatal("anchored receipt failed offline verification")
+				}
+				recovery.versions = append(recovery.versions, recoveredFixture{receipt.document.ID, receipt.raw, proof})
+				break
+			}
+			if response.StatusCode != 409 || time.Now().After(deadline) {
+				t.Fatalf("proof did not become available: %d", response.StatusCode)
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
-		if response.StatusCode != 409 || time.Now().After(deadline) {
-			t.Fatalf("proof did not become available: %d", response.StatusCode)
-		}
-		time.Sleep(200 * time.Millisecond)
 	}
 	if export := loadLabPage(t, browser, url+"?format=json", nil, 200); export != string(first.raw) {
 		t.Fatal("correction overwrote old snapshot")

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -158,7 +159,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	}
 	api("PUT", "/repos/labowner/conflict/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
 	labAPI(t, base, reviewerToken, "POST", fmt.Sprintf("/repos/labowner/conflict/pulls/%d/reviews", approved), map[string]string{"event": "APPROVED", "body": "Synthetic verified review"}, nil, 200)
-	browser, bridgeURL := loginLab(t, base, ownerToken, "labreader", readerPassword, repos)
+	browser, bridgeURL := loginLab(t, base, ownerToken, "labreader", readerPassword, repos, nil)
 	lookupURL := bridgeURL + "/bridge/api/topics/lookup?project_id=lab&topic=CAD-01"
 	data := loadLabPage(t, browser, lookupURL, nil, 200)
 	if !strings.Contains(data, `"name":"conflict"`) || !strings.Contains(data, `"lifecycle":"merged"`) || strings.Contains(data, `"name":"hidden"`) {
@@ -204,7 +205,8 @@ func TestGiteaLocalLab(t *testing.T) {
 	api("PUT", "/repos/labowner/no-match/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
 	api("PUT", "/repos/labowner/merged/collaborators/labreviewer", map[string]string{"permission": "write"}, nil, 204)
 	seedBranch("no-match", "bridge-source")
-	writer, writerURL := loginLab(t, base, ownerToken, "labreviewer", reviewerPassword, repos)
+	var recovery receiptRecoveryLab
+	writer, writerURL := loginLab(t, base, ownerToken, "labreviewer", reviewerPassword, repos, &recovery)
 	writeSelection := fmt.Sprintf(`{"project_id":"lab","topic":"CAD-01","members":[
 {"repository_id":%d,"source_branch":"missing","target_branch":"main"},
 {"repository_id":%d,"source_branch":"changes","target_branch":"main"},
@@ -307,7 +309,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	if remaining == nil || remaining.State != "blocked" || remaining.ResultCode != "pull_not_ready" || readMergeTarget(repos[1], batch.Members[1], false).Merged {
 		t.Fatalf("conflicting repository did not stay blocked: %+v", remaining)
 	}
-	verifyReceiptLab(t, base, ownerToken, writer, writerURL, batch.ID, repos, release.ID, actualMerge.SHA, mergedBatch.Members[2].Merge.MergeSHA)
+	verifyReceiptLab(t, base, ownerToken, writer, writerURL, batch.ID, repos, release.ID, actualMerge.SHA, mergedBatch.Members[2].Merge.MergeSHA, &recovery)
 	revertURL := func(member TopicMember) string {
 		return fmt.Sprintf("%s/bridge/api/topics/%s/members/%d/revert-pr", writerURL, batch.ID, member.ID)
 	}
@@ -383,6 +385,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	loadLabPage(t, browser, lookupURL, nil, 401)
 	checkHookLab(t, hookStore, "pull_request", repos[0].ID, merged, actualMerge.SHA, "")
 	checkHookLab(t, hookStore, "release", repos[0].ID, release.ID, actualMerge.SHA, "build/v1")
+	recovery.verifyRestored(t)
 }
 
 func checkHookLab(t *testing.T, store *TopicStore, kind string, repoID, objectID int64, sha, tag string) {
@@ -409,17 +412,20 @@ json_extract(observation, '$.status') IN ('merged', 'published') LIMIT 1`, kind,
 	t.Fatalf("Gitea %s callback not verified: %d queued; last error %q", kind, jobs, failure)
 }
 
-func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, repos []Repository) (*http.Client, string) {
+func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, repos []Repository, recovery *receiptRecoveryLab) (*http.Client, string) {
 	t.Helper()
-	store, err := OpenTopicStore(context.Background(), filepath.Join(t.TempDir(), "bridge.db"))
+	database := filepath.Join(t.TempDir(), "bridge.db")
+	store, err := OpenTopicStore(context.Background(), database)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
 	app := httptest.NewUnstartedServer(nil)
+	t.Cleanup(app.Close)
 	bridgeURL := "http://" + app.Listener.Addr().String()
 	var anchorPublic string
 	var receipts *ReceiptConfig
+	var closeAnchor func()
 	if username == "labreviewer" {
 		artifactRoot := t.TempDir()
 		repoFolder := filepath.Join(artifactRoot, fmt.Sprint(repos[2].ID))
@@ -437,16 +443,25 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 		if err != nil {
 			t.Fatal(err)
 		}
-		ledger, err := OpenAnchorLedger(context.Background(), filepath.Join(t.TempDir(), "anchor.db"), base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{23}, 32)), anchorBearer)
+		anchorPath := filepath.Join(t.TempDir(), "anchor.db")
+		anchorSeed := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{23}, 32))
+		ledger, err := OpenAnchorLedger(context.Background(), anchorPath, anchorSeed, anchorBearer)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { ledger.Close() })
 		anchorServer := httptest.NewServer(ledger.Handler())
 		t.Cleanup(anchorServer.Close)
+		closeAnchor = sync.OnceFunc(func() {
+			anchorServer.Close()
+			if err := ledger.Close(); err != nil {
+				t.Error(err)
+			}
+		})
 		anchorPublic = ledger.PublicKey()
 		receipts.Anchor = &ReceiptAnchorConfig{URL: anchorServer.URL + "/v1/anchors", PublicKey: anchorPublic, Bearer: anchorBearer}
-		t.Setenv("BRIDGE_TEST_TRUSTED_ANCHOR_KEY", anchorPublic)
+		recovery.bridgeDB, recovery.snapshots, recovery.anchorDB = database, receipts.SnapshotRoot, anchorPath
+		recovery.anchorKey, recovery.anchorSeed, recovery.anchorBearer = anchorPublic, anchorSeed, anchorBearer
 	}
 	var creds struct {
 		ID     string `json:"client_id"`
@@ -477,7 +492,16 @@ func loginLab(t *testing.T, giteaURL, ownerToken, username, password string, rep
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() { defer close(done); worker.Run(ctx) }()
-		t.Cleanup(func() { cancel(); <-done })
+		stopWorker := sync.OnceFunc(func() { cancel(); <-done })
+		t.Cleanup(stopWorker)
+		recovery.stop = sync.OnceFunc(func() {
+			app.Close()
+			stopWorker()
+			closeAnchor()
+			if err := store.Close(); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {

@@ -17,6 +17,11 @@ var errIdempotencyConflict = errors.New("idempotency key was used by a different
 
 type TopicStore struct{ db *sql.DB }
 
+const (
+	bridgeApplicationID = 0x47544252
+	bridgeSchemaVersion = 7
+)
+
 type TopicChangeSet struct {
 	ID        string        `json:"id"`
 	ProjectID string        `json:"project_id"`
@@ -77,7 +82,6 @@ func prepareTopicStore(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	defer tx.Rollback()
-	const bridgeApplicationID = 0x47544252
 	var version, applicationID int
 	if err := tx.QueryRowContext(ctx, `PRAGMA application_id`).Scan(&applicationID); err != nil {
 		return err
