@@ -20,7 +20,25 @@ Bridge 用 Gitea OAuth2 授权码、PKCE 与 state。固定回调 `/bridge/auth/
 1. 在 Gitea 注册机密 OAuth2 应用。回调须完整匹配网关地址，例如 `https://git.office.example:8443/bridge/auth/callback`。默认申请 `read:user` 和 `read:repository`，不需要管理员令牌。`enable_pull_creation`、`enable_merge`、`enable_revert` 独立开关、默认关闭；开启任一个都需要 Bridge 数据库和重新登录授权 `write:repository`。这是 Gitea 的仓库级写权限，不是仅限 PR。只在需要写操作的实例启用。
 2. 复制 `examples/bridge.json` 到部署目录，填写 Gitea 内部地址、两个浏览器入口、OAuth client ID 及仓库白名单。仓库 `id` 是 Gitea API 返回的数字 ID；删除重建仓库后需确认新 ID，不按同名自动接管。若要保存联调单，先在本机磁盘创建受限的数据目录，再配置 `database_path` 为其中的绝对路径；不要使用共享盘、Gitea 数据库或其他 Gitea 实例的 Bridge 数据库。未设置 `database_path` 时只开放即时查询。
 3. 使用 Go 1.26 或以上版本，在仓库目录执行 `go build -o bridge.exe ./cmd/bridge`。从安全的启动环境设置 `BRIDGE_OAUTH_CLIENT_SECRET`，再执行 `.\bridge.exe -config C:\path\to\bridge.json`。默认监听 `127.0.0.1:3001`，通过网关访问 `/bridge/`。不要把密钥写进配置或提交到 Git。
-4. 当前以前台进程运行。会话只保留在内存，最长一小时，进程重启须重新登录。`allow_loopback_http` 仅用于隔离实验，非回环 HTTP 不允许。
+4. 初装先以前台运行，确认配置和回环入口正常，再注册 Windows 服务。会话只保留在内存，最长一小时，进程重启须重新登录。`allow_loopback_http` 仅用于隔离实验，非回环 HTTP 不允许。
+
+### 注册 Windows 服务
+
+在测试机上为 Bridge、Gitea、Caddy 和可选存证服务分别准备低权限账号。Bridge 账号只读程序目录和配置，读取制品，且只对自己的数据库、快照及日志目录有写权限；不得接触 Gitea 裸仓和独立存证目录。Gitea 和 Caddy 分别按 [Gitea 服务文档](https://docs.gitea.com/installation/windows-service/) 与 [Caddy 服务文档](https://caddyserver.com/docs/running#windows-service) 注册，设置自己的账号与目录，不照搬默认 LocalSystem。
+
+为 Bridge 新建只允许管理员和服务账号读取的 JSON 密钥文件，保存 `oauth_client_secret`；按需加 `webhook_secret`、`webhook_reader_token`、`receipt_signing_seed`、`anchor_bearer`。独立存证服务用不同文件，只放 `anchor_signing_seed` 和 `anchor_bearer`。启用 `-secrets` 后只读该文件，不再混用启动环境中的密钥。密钥值不要写入命令行、服务注册表或 Git。
+
+用管理员 PowerShell 注册（前提是目标账号拥有「作为服务登录」权限，目录及 ACL 已就绪）：
+
+```powershell
+$credential = Get-Credential -UserName '.\BridgeSvc' -Message '专用低权限账号'
+.\examples\Register-BridgeService.ps1 -Name GiteaTopicBridge -Credential $credential `
+  -Executable 'C:/Bridge/bin/bridge.exe' -Config 'C:/Bridge/config/bridge.json' `
+  -Secrets 'C:/Bridge/config/secrets.json' -LogFile 'C:/Bridge/log/bridge.log' -Listen '127.0.0.1:3001'
+Start-Service -Name GiteaTopicBridge
+```
+
+命令末尾的反引号表示换行。需要 Webhook 时额外传 `-HookListen '127.0.0.1:3002'`。独立存证改用 `-AnchorDatabase` 替代 `-Config`，另选服务名、账号、密钥文件和端口。注册脚本不会覆盖已有服务，也不会立即启动；可先用 `-WhatIf`。服务以延迟自动启动，失败后依次等 5、30、120 秒再启动；用 `sc.exe qfailure GiteaTopicBridge` 核对。所有监听绑定完成后才报告 Running；停止时不再接新请求并等待后台任务退出。预留日志容量并单独做轮转。回滚注册可先 `Stop-Service -Name GiteaTopicBridge` 再 `sc.exe delete GiteaTopicBridge`，不会删除业务文件。
 
 ### 内部 Webhook
 
