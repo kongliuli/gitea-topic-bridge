@@ -146,23 +146,7 @@ func startLabCaddy(t *testing.T, binary, gateway, dialAddress, gitea, bridge str
 }
 `, filepath.ToSlash(storage))
 	config += strings.NewReplacer("git.office.example:8443", gateway, "127.0.0.1:3000", strings.TrimPrefix(gitea, "http://"), "127.0.0.1:3001", bridge).Replace(string(data))
-	path := filepath.Join(dir, "Caddyfile")
-	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
-		t.Fatal(err)
-	}
-	logFile, err := os.Create(filepath.Join(dir, "caddy.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(binary, "run", "--config", path, "--adapter", "caddyfile")
-	command.Dir = dir
-	command.Stdout, command.Stderr = logFile, logFile
-	err = command.Start()
-	logFile.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { command.Process.Kill(); command.Wait() })
+	logPath := runLabCaddy(t, binary, dir, config)
 	ca := filepath.Join(storage, "pki", "authorities", "local", "root.crt")
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -179,22 +163,106 @@ func startLabCaddy(t *testing.T, binary, gateway, dialAddress, gitea, bridge str
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Jar: jar, Timeout: 8 * time.Second, Transport: transport}
 	installed := false
-	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+	waitForLabCaddy(t, logPath, func() bool {
 		if !installed {
 			pem, _ := os.ReadFile(ca)
 			installed = roots.AppendCertsFromPEM(pem)
 		}
-		if installed {
-			res, err := client.Get("https://" + gateway + "/bridge/")
-			if err == nil {
-				res.Body.Close()
-				if res.StatusCode == 200 {
-					return ca, client
-				}
-			}
+		return installed && labCaddyReady(client, "https://"+gateway+"/bridge/")
+	})
+	return ca, client
+}
+
+func runLabCaddy(t *testing.T, binary, dir, config string) string {
+	t.Helper()
+	path := filepath.Join(dir, "Caddyfile")
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "caddy.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(binary, "run", "--config", path, "--adapter", "caddyfile")
+	command.Dir = dir
+	command.Stdout, command.Stderr = logFile, logFile
+	err = command.Start()
+	logFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { command.Process.Kill(); command.Wait() })
+	return logPath
+}
+
+func labCaddyReady(client *http.Client, address string) bool {
+	response, err := client.Get(address)
+	if err != nil {
+		return false
+	}
+	response.Body.Close()
+	return response.StatusCode == 200
+}
+
+func waitForLabCaddy(t *testing.T, logPath string, ready func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		if ready() {
+			return
 		}
 	}
-	log, _ := os.ReadFile(filepath.Join(dir, "caddy.log"))
+	log, _ := os.ReadFile(logPath)
 	t.Fatalf("the isolated gateway did not start: %s", log)
-	return "", nil
+}
+
+func TestCaddyTailnetLoopback(t *testing.T) {
+	binary := os.Getenv("BRIDGE_TEST_CADDY_BINARY")
+	if binary == "" {
+		t.Skip("set BRIDGE_TEST_CADDY_BINARY for loopback gateway validation")
+	}
+	if !filepath.IsAbs(binary) {
+		t.Fatal("Caddy binary path must be absolute")
+	}
+	upstream := func(name string) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			fmt.Fprintf(writer, "%s %s", name, request.URL.RequestURI())
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+	gitea, bridge := upstream("gitea"), upstream("bridge")
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	listener.Close()
+	data, err := os.ReadFile("examples/Caddyfile.tailnet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := "{\n\tadmin off\n\tpersist_config off\n}\n"
+	config += strings.NewReplacer("127.0.0.1:8080", address, "127.0.0.1:3000", gitea.Listener.Addr().String(), "127.0.0.1:3001", bridge.Listener.Addr().String()).Replace(string(data))
+	logPath := runLabCaddy(t, binary, t.TempDir(), config)
+	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	base := "http://" + address
+	waitForLabCaddy(t, logPath, func() bool { return labCaddyReady(client, base+"/") })
+	if got := loadLabPage(t, client, base+"/lab/fixture.git/info/refs?service=git-upload-pack", nil, 200); got != "gitea /lab/fixture.git/info/refs?service=git-upload-pack" {
+		t.Fatal("expected Git HTTPS paths received from Serve to route to Gitea over local HTTP")
+	}
+	if got := loadLabPage(t, client, base+"/bridge/auth/callback?state=fixture", nil, 200); got != "bridge /bridge/auth/callback?state=fixture" {
+		t.Fatal("expected Bridge callback path and query to reach Bridge unchanged")
+	}
+	if got := loadLabPage(t, client, base+"/internal/hooks/gitea", nil, 404); got != "" {
+		t.Fatal("expected the loopback gateway to block the internal webhook path")
+	}
+	response, err := client.Get(base + "/bridge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 308 || response.Header.Get("Location") != "/bridge/" {
+		t.Fatal("expected /bridge to redirect to /bridge/")
+	}
 }

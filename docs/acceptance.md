@@ -86,6 +86,15 @@ $env:BRIDGE_TEST_CADDY_BINARY = 'C:\path\to\caddy.exe'
 go test -v -timeout 3m -run '^TestGiteaGatewayTLS$' -count=1 ./...
 ```
 
+## 已验证：Tailscale Serve 后的 HTTP 回环路由
+
+使用真实 Caddy v2.11.9 与两个合成上游，验证 [回环网关样例](../examples/Caddyfile.tailnet) 将原始 Git 查询路径交给 Gitea、将 OAuth 回调及查询参数交给 Bridge，且内部 Webhook 由网关直接返回 `404`。`/bridge` 会跳转到 `/bridge/`。真实 Serve 证书、MagicDNS 和 grants 仍须由指定 tailnet 的客户端验收。
+
+```powershell
+$env:BRIDGE_TEST_CADDY_BINARY = 'C:\path\to\caddy.exe'
+go test -v -run '^TestCaddyTailnetLoopback$' -count=1 ./...
+```
+
 ## 已验证：Windows 服务模式的本地测试
 
 Windows 构建和测试验证 SCM 处理器的启动、询问、停止、关机及失败状态，回环 HTTP 监听在取消时释放端口，后台任务完成后才退出；占用任一个端口不会报告就绪。注册脚本两个模式都通过 `-WhatIf` 检查，未改变当前主机服务。当前会话没有管理员权限，未做真实 SCM 注册、专用账号 ACL、故障恢复或主机重启。部署验收须另在隔离测试机使用管理员会话完成。

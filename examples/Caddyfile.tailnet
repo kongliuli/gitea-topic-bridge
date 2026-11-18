@@ -1,0 +1,14 @@
+http://127.0.0.1:8080 {
+    bind 127.0.0.1
+    @private path /internal /internal/*
+    handle @private {
+        respond 404
+    }
+    redir /bridge /bridge/ 308
+    handle /bridge/* {
+        reverse_proxy 127.0.0.1:3001
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
+}
