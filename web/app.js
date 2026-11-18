@@ -109,7 +109,11 @@ async function loadOverview() {
 }
 
 overview.addEventListener('toggle', loadOverview);
-project.addEventListener('change', loadOverview);
+project.addEventListener('change', () => {
+  invalidateTopicView();
+  loadOverview();
+});
+topic.addEventListener('input', invalidateTopicView);
 refreshOverview.addEventListener('click', loadOverview);
 
 function showResults(data, decorate) {
@@ -167,6 +171,7 @@ async function lookup() {
   results.replaceChildren();
   try {
     const response = await fetch(`/bridge/api/topics/lookup?${params}`, { signal: query.signal });
+    if (query.signal.aborted) return;
     if (response.status === 401) return requireLogin();
     if (response.status === 404) {
       message.textContent = '找不到这个项目组，或你没有查看权限。';
@@ -179,6 +184,7 @@ async function lookup() {
     if (writesEnabled && data.repositories.length) {
       try {
         const sourceOptions = await fetch(`/bridge/api/projects/${encodeURIComponent(params.get('project_id'))}/forks`, { signal: query.signal });
+        if (query.signal.aborted) return;
         if (sourceOptions.status === 401) return requireLogin();
         if (!sourceOptions.ok) throw new Error('fork lookup failed');
         forks = await sourceOptions.json();
@@ -244,6 +250,17 @@ function clearSavedTopic() {
   savedTopic.replaceChildren();
 }
 
+function invalidateTopicView() {
+  activeQuery?.abort();
+  activeQuery = undefined;
+  submit.disabled = false;
+  clearSavedTopic();
+  results.replaceChildren();
+  const query = overview.open ? `?${new URLSearchParams({ overview: project.value })}` : '';
+  history.replaceState(null, '', '/bridge/' + query);
+  message.textContent = '查询后查看当前选择的结果。';
+}
+
 save.addEventListener('click', async () => {
   const submitted = draft;
   if (!submitted) return;
@@ -302,6 +319,7 @@ async function openSavedTopic(id, note = '') {
   message.textContent = '正在读取联调单…';
   try {
     const response = await fetch(`/bridge/api/topics/${encodeURIComponent(id)}`, { signal: query.signal });
+    if (query.signal.aborted) return;
     if (response.status === 401) return requireLogin();
     if (response.status === 404) {
       message.textContent = '找不到这个联调单，或你没有查看全部成员仓的权限。';

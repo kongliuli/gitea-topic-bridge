@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -167,6 +168,62 @@ func TestPartialMergeEdge(t *testing.T) {
 	}
 }
 
+func TestTopicSelectionInvalidatesOldResultsEdge(t *testing.T) {
+	edge := edgeForTest(t)
+	mux := http.NewServeMux()
+	serveBrowserTestPage(t, mux, "/bridge/{$}", "index.html", `
+const form = document.querySelector('#lookup');
+const project = form.elements.namedItem('project_id');
+const topic = form.elements.namedItem('topic');
+const results = document.querySelector('#results');
+const save = document.querySelector('#save-topic');
+let stage = 0;
+const observer = new MutationObserver(step);
+observer.observe(results, { childList: true });
+step();
+function step() {
+  if (stage === 0 && results.textContent.includes('lab/first') && !save.hidden) {
+    stage++;
+    project.value = 'second';
+    project.dispatchEvent(new Event('change'));
+    if (results.children.length || !save.hidden) {
+      document.body.dataset.result = 'stale-project';
+      observer.disconnect();
+      return;
+    }
+    form.requestSubmit();
+  } else if (stage === 1 && results.textContent.includes('lab/second') && !save.hidden) {
+    observer.disconnect();
+    topic.value = 'CAD-NEW';
+    topic.dispatchEvent(new Event('input'));
+    const oldQuery = new URLSearchParams(location.search).has('topic');
+    document.body.dataset.result = results.children.length || !save.hidden || oldQuery ? 'stale-topic' : 'fresh-selection';
+  }
+}
+`)
+	mux.HandleFunc("GET /bridge/app.js", serveAsset("app.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /bridge/style.css", serveAsset("style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /bridge/api/projects", func(writer http.ResponseWriter, _ *http.Request) {
+		responseJSON(writer, 200, json.RawMessage(`{"user":"fixture","projects":[{"id":"first","name":"First"},{"id":"second","name":"Second"}],"saved_topics":true}`))
+	})
+	mux.HandleFunc("GET /bridge/api/topics/lookup", func(writer http.ResponseWriter, request *http.Request) {
+		project := request.URL.Query().Get("project_id")
+		if (project != "first" && project != "second") || request.URL.Query().Get("topic") != "CAD-01" {
+			t.Error("unexpected query from the project selector")
+			writer.WriteHeader(400)
+			return
+		}
+		responseJSON(writer, 200, map[string]any{
+			"repositories": []RepositoryResult{{Repository: Repository{ID: 1, Owner: "lab", Name: project},
+				Status: "complete", PullRequests: []PullRequest{}}},
+			"complete": true, "found": false,
+		})
+	})
+	if rendered := dumpBrowserPage(t, edge, mux, "/bridge/?project_id=first&topic=CAD-01"); !strings.Contains(rendered, `data-result="fresh-selection"`) {
+		t.Fatal("changing a project or topic left a previous result or action in the page")
+	}
+}
+
 func TestReceiptIssueEdge(t *testing.T) {
 	edge := edgeForTest(t)
 	node, err := exec.LookPath("node")
@@ -323,10 +380,23 @@ func dumpBrowserPage(t *testing.T, edge string, handler http.Handler, path strin
 	defer cancel()
 	command := exec.CommandContext(ctx, edge, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
 		"--disable-background-networking", "--user-data-dir="+t.TempDir(), "--virtual-time-budget=5000", "--dump-dom", lab.URL+path)
-	output, err := os.Create(filepath.Join(t.TempDir(), "page.html"))
+	output, err := os.CreateTemp("", "bridge-edge-page-*.html")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		// A Windows Edge child can release the inherited handle shortly after exit.
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+			err := os.Remove(output.Name())
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("remove Edge output: %v", err)
+				return
+			}
+		}
+	})
 	// Edge child processes can inherit an output pipe and keep it open after the main process exits.
 	command.Stdout = output
 	err = command.Run()
