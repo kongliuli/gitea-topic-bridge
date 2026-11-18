@@ -1,9 +1,16 @@
 package bridge
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +26,12 @@ func TestGiteaColdRestoreLab(t *testing.T) {
 	if !filepath.IsAbs(binary) {
 		t.Fatal("Gitea binary path must be absolute")
 	}
-	base, command := prepareLocalGitea(t, binary, "", "")
+	withAssets := os.Getenv("BRIDGE_TEST_GITEA_RESTORE_ASSETS") == "1"
+	settings := ""
+	if withAssets {
+		settings = "[server]\nLFS_START_SERVER = true\n[attachment]\nENABLED = true\n"
+	}
+	base, command := prepareLocalGitea(t, binary, "", "", settings)
 	proc := command("web")
 	done, result := launchLocalGitea(t, base, proc)
 	owner, _ := createLabUser(t, command, "labowner", "all", "--admin")
@@ -34,6 +46,10 @@ func TestGiteaColdRestoreLab(t *testing.T) {
 	labAPI(t, base, owner, "POST", repoPath+"/contents/fixture.txt", map[string]string{
 		"branch": "main", "message": "Restore fixture", "content": base64.StdEncoding.EncodeToString([]byte(payload)),
 	}, nil, 201)
+	var assets restoreAssets
+	if withAssets {
+		assets = seedGiteaRestoreAssets(t, base, owner, password)
+	}
 	var before struct{ Commit struct{ ID string } }
 	labAPI(t, base, writer, "GET", repoPath+"/branches/main", nil, &before, 200)
 	if !commitSHA.MatchString(before.Commit.ID) {
@@ -106,7 +122,15 @@ func TestGiteaColdRestoreLab(t *testing.T) {
 			t.Fatalf("Git %s on the restored instance: %v\n%s", args[0], err, out)
 		}
 	}
-	git("clone", "--branch", "main", address+"/labowner/restore-fixture.git", ".")
+	if withAssets {
+		git("clone", "--no-checkout", "--branch", "main", address+"/labowner/restore-fixture.git", ".")
+		git("lfs", "install", "--local")
+		git("checkout", "main")
+		git("lfs", "pull")
+		assets.verify(t, address, writer, password, dir)
+	} else {
+		git("clone", "--branch", "main", address+"/labowner/restore-fixture.git", ".")
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "fixture.txt"))
 	if err != nil || strings.ReplaceAll(string(data), "\r\n", "\n") != payload {
 		t.Fatalf("original file did not survive the restore: %v", err)
@@ -115,6 +139,100 @@ func TestGiteaColdRestoreLab(t *testing.T) {
 	labAPI(t, address, writer, "GET", repoPath+"/branches/restore-proof", nil, &branch, 200)
 	if branch.Commit.ID != before.Commit.ID {
 		t.Fatal("restored Git hooks failed to record the new branch")
+	}
+}
+
+type restoreAssets struct {
+	releaseID   int64
+	attachment  int64
+	lfsDigest   [sha256.Size]byte
+	assetDigest [sha256.Size]byte
+}
+
+func seedGiteaRestoreAssets(t *testing.T, base, owner, password string) restoreAssets {
+	t.Helper()
+	dir := t.TempDir()
+	const repoURL = "/labowner/restore-fixture.git"
+	git := func(args ...string) string {
+		t.Helper()
+		result, err := labGit(t, dir, base, "labwriter", password, args...)
+		if err != nil {
+			t.Fatalf("Git %s while creating restore assets: %v\n%s", args[0], err, result)
+		}
+		return result
+	}
+	git("clone", "--branch", "main", base+repoURL, ".")
+	git("lfs", "install", "--local")
+	git("lfs", "track", "*.bin")
+	lfs := []byte(strings.Repeat("isolated LFS content\x00", 4096))
+	if err := os.WriteFile(filepath.Join(dir, "fixture.bin"), lfs, 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".gitattributes", "fixture.bin")
+	git("-c", "user.name=Restore Fixture", "-c", "user.email=restore@example.invalid", "commit", "-m", "Add a Git LFS fixture")
+	digest := sha256.Sum256(lfs)
+	if pointer := git("show", "HEAD:fixture.bin"); !strings.Contains(pointer, fmt.Sprintf("oid sha256:%x", digest)) || len(pointer) > 200 {
+		t.Fatal("Git did not store an LFS pointer")
+	}
+	git("push", "origin", "HEAD:refs/heads/main")
+
+	const apiPath = "/repos/labowner/restore-fixture/releases"
+	var release struct{ ID int64 }
+	labAPI(t, base, owner, "POST", apiPath, map[string]string{
+		"tag_name": "fixture-v1", "target_commitish": "main", "name": "Restore fixture",
+	}, &release, 201)
+	attachment := "isolated release attachment\n"
+	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, err := http.NewRequest(http.MethodPost, base+"/api/v1"+fmt.Sprintf("%s/%d/assets?name=attachment.txt", apiPath, release.ID), strings.NewReader(attachment))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+owner)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		t.Fatalf("attach the release fixture: status %d, %s", response.StatusCode, body)
+	}
+	var asset struct{ ID int64 }
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&asset); err != nil || asset.ID < 1 {
+		t.Fatalf("could not read the fixture attachment ID: %v", err)
+	}
+	return restoreAssets{release.ID, asset.ID, digest, sha256.Sum256([]byte(attachment))}
+}
+
+func (assets restoreAssets) verify(t *testing.T, base, token, password, dir string) {
+	t.Helper()
+	fixture, err := os.ReadFile(filepath.Join(dir, "fixture.bin"))
+	if err != nil || sha256.Sum256(fixture) != assets.lfsDigest {
+		t.Fatalf("restored clone did not fetch the original LFS bytes: %v", err)
+	}
+	var asset struct {
+		ID  int64
+		URL string `json:"browser_download_url"`
+	}
+	endpoint := fmt.Sprintf("/repos/labowner/restore-fixture/releases/%d/assets/%d", assets.releaseID, assets.attachment)
+	labAPI(t, base, token, "GET", endpoint, nil, &asset, 200)
+	download, err := url.Parse(asset.URL)
+	if err != nil || asset.ID != assets.attachment || !strings.HasPrefix(asset.URL, base+"/") || download.User != nil {
+		t.Fatalf("restored release attachment has an unexpected ID or download URL: %d %q", asset.ID, asset.URL)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	browser := &http.Client{Jar: jar, Timeout: 10 * time.Second}
+	form := url.Values{"user_name": {"labwriter"}, "password": {password}}
+	loginURL := base + "/user/login"
+	addLabCSRF(loadLabPage(t, browser, loginURL, nil, 200), form)
+	loadLabPage(t, browser, loginURL, form, 200)
+	data := loadLabPage(t, browser, asset.URL, nil, 200)
+	if sha256.Sum256([]byte(data)) != assets.assetDigest {
+		t.Fatal("restored release attachment bytes did not match the original")
 	}
 }
 

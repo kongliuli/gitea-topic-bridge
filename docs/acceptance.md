@@ -127,9 +127,10 @@ Windows 集成测试从真实 Gitea 签发两版回执后，干净关闭 Bridge 
 
 用 Gitea v28.4.0 的 `manager shutdown` 正常停止隔离实例并等待进程退出，确认 SQLite 日志已经关闭。将裸仓、应用数据、自定义目录及配置复制到备份目录，再恢复到另一个空目录。调整目录和回环端口并重建 Git hooks 后，原普通协作者可使用原权限克隆私有仓。仓库数字 ID、默认分支 SHA、保护规则及克隆文件内容与原实例一致。恢复后推送获准的新分支，Gitea API 可读取到新分支和正确 SHA。
 
-此项使用本地 SQLite 和合成仓。生产外部数据库、LFS、附件、对象存储、证书和服务账户权限仍须按启用范围验收。
+另启用本地 Git LFS 和发布附件。恢复后，从新克隆下载原 LFS 对象，由普通协作者登录下载原发布附件，两份文件的 SHA-256 均与备份前一致。外部数据库、对象存储、证书和服务账户权限仍须按目标环境的启用范围验收。
 
 ```powershell
 $env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
+$env:BRIDGE_TEST_GITEA_RESTORE_ASSETS = '1' # 同时验证 LFS 和附件，需安装 git-lfs
 go test -v -timeout 3m -run '^TestGiteaColdRestoreLab$' -count=1 ./...
 ```

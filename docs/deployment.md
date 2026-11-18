@@ -100,7 +100,7 @@ Start-Service -Name GiteaTopicBridge
 1. 在低峰暂停签发和写操作，记录 Gitea、Bridge、存证服务版本及公钥指纹。正常停止 Bridge，再正常停止存证服务；确认所有 SQLite 连接已关闭。不要删除残留的 `-wal`、`-shm` 或 `-journal` 来强行备份；若残留，应先在受控条件下恢复数据库并正常关闭，再重试。另安排 Gitea 停机，用 [Gitea 备份与恢复流程](https://docs.gitea.com/administration/backup-and-restore/) 保全业务库、裸仓、LFS/附件、配置和自定义目录；对外部数据库用该数据库的原生备份。单独保全 Caddy 配置及所需证书材料。
 2. 在各自权限边界，用 `examples/Copy-StoppedDatabase.ps1` 复制 Bridge 数据库和快照，以及独立存证账本。目标必须是已建好的、受限 ACL 的空目录；脚本不覆盖已有文件，不复制密钥。受限保存 OAuth、Webhook、签发和存证私钥的对应版本，单独备份服务配置和收件目录。不要将独立账本的备份交给 Bridge 服务账号。
 3. 用同一脚本把每份备份再复制到新的隔离空目录。输出固定为 `state.sqlite3` 及可选的 `snapshots/`。保留生产目录原样；脚本报错时，不要使用部分输出。对带回执的备份，用下面的离线核验命令复验；比对签名版本数、制品数、存证数与备份时的记录。未完成的待存证项不等于已存证。若核对独立账本，需由同时获得两个备份副本的独立验收人员执行，不授予 Bridge 账号账本文件权限。
-4. Gitea 的 SQLite 冷备在正常停止且没有残留日志后，复制数据库、裸仓、应用数据、自定义目录和实际 `app.ini`。恢复到隔离空目录，使用新的测试入口，逐一改写配置中的路径和端口，保全原密钥。移动 Gitea 目录后，用恢复配置执行 `gitea --work-path <恢复目录> --config <恢复的app.ini> admin regenerate hooks`。用测试协作者登录并克隆，核对仓库数字 ID、默认分支 SHA、保护规则，再在允许的测试分支验证推送生效。生产路径切换前保持源实例和备份可用。参见 [Gitea 恢复流程](https://docs.gitea.com/administration/backup-and-restore/)。
+4. Gitea 的 SQLite 冷备在正常停止且没有残留日志后，复制数据库、裸仓、应用数据、自定义目录和实际 `app.ini`。恢复到隔离空目录，使用新的测试入口，逐一改写配置中的路径和端口，保全原密钥。移动 Gitea 目录后，用恢复配置执行 `gitea --work-path <恢复目录> --config <恢复的app.ini> admin regenerate hooks`。用测试协作者登录并克隆，核对仓库数字 ID、默认分支 SHA、保护规则，再在允许的测试分支验证推送生效。如果使用 LFS 或发布附件，从新克隆重新下载 LFS 文件，登录后下载附件，与备份前记录的 SHA-256 比较；如果使用外部对象存储，也要恢复对应存储。生产路径切换前保持源实例和备份可用。参见 [Gitea 恢复流程](https://docs.gitea.com/administration/backup-and-restore/)。
 
 ```powershell
 .\examples\Copy-StoppedDatabase.ps1 -Database 'C:/Bridge/data/bridge.db' -Snapshots 'C:/Bridge/snapshots' -Destination 'D:/Backup/bridge-copy'
