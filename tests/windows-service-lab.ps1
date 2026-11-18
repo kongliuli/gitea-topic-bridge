@@ -313,6 +313,9 @@ INSTALL_LOCK = true
 DISABLE_REGISTRATION = true
 [actions]
 ENABLED = false
+[migrations]
+EGRESS_MODE = strict
+ALLOWED_HOST_LIST = github.com:443
 [git]
 PATH = $gitExecutable
 [log]
@@ -451,6 +454,8 @@ LEVEL = warn
     $clientFixture | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
     & go test -v -timeout 2m -run '^TestSCMHostedStack$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted stack did not pass HTTPS acceptance.' }
+    & go test -v -timeout 2m -run '^TestSCMServicePullMirror$' -count=1 .
+    if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted Gitea mirror did not pass the outbound and read-only checks.' }
 
     $startOrder = @($giteaService, $anchorService, $bridgeService, $caddyService)
     $caHash = (Get-FileHash -LiteralPath $caPath).Hash
