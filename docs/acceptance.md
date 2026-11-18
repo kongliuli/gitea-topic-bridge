@@ -142,6 +142,8 @@ Windows 构建和测试验证 SCM 处理器的启动、询问、停止、关机�
 
 随后在同类 VM 加入 Gitea v28.4.0 和 Caddy v2.11.9，下载后校验 SHA-256。四个服务分别以专用账号启动并绑定回环。普通 Gitea 协作者从真实 Caddy HTTPS 入口完成 OAuth，保存联调单，核对私有仓的 Git HTTPS 引用和 Bridge 项目总览指向同一提交。匿名账号看不到私有仓，外部网关拒绝内部 Webhook，四个服务都接受 SCM 停止。[完整链路运行记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44383280169)
 
+增强验收用 Windows 服务登录令牌验证实际文件权限。Bridge 能读取收件制品，无法写入制品及自身配置，也无法打开 Gitea 数据库或独立存证账本。普通签发者在 HTTPS 入口签发该制品，回执 SHA-256 与原件匹配，独立进程的凭证与回执一起通过离线验签。Git HTTPS 也完成了私有仓克隆，克隆 SHA 与 Bridge 总览一致。[权限与交付验收记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44385352523)
+
 可在 GitHub Actions 手动运行「Windows service lab」复验。目标主机的整机重启、实际账户和业务路径 ACL、远程网络与项目试接仍须现场验收。
 
 ## 已验证：Bridge 与独立账本空目录恢复
