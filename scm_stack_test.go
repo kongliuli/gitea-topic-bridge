@@ -198,6 +198,7 @@ type scmStackFixture struct {
 	OwnerPassword         string `json:"owner_password"`
 	DeveloperToken        string `json:"developer_token"`
 	DeveloperPassword     string `json:"developer_password"`
+	ViewerPassword        string `json:"viewer_password"`
 	PilotID               int64  `json:"pilot_id"`
 }
 

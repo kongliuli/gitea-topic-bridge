@@ -477,6 +477,11 @@ LEVEL = warn
         gitea_api = $giteaUrl; owner_token = $owner.Token; owner_password = $owner.Password
         developer_token = $developer.Token; developer_password = $developer.Password; pilot_id = $pilot.id
     }
+    if ($env:BRIDGE_TEST_EDGE_BINARY) {
+        $viewer = New-GiteaLabUser $giteaApp $giteaFlags 'labviewer' 'read:repository,read:user'
+        $null = Invoke-RestMethod @api -Method Put -Uri "$giteaUrl/api/v1/repos/labowner/fixture/collaborators/labviewer" -Body '{"permission":"read"}'
+        $clientFixture.viewer_password = $viewer.Password
+    }
     $clientFixture | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
     & go test -v -timeout 2m -run '^TestSCMHostedStack$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted stack did not pass HTTPS acceptance.' }

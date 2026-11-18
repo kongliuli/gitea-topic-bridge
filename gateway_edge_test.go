@@ -15,15 +15,15 @@ import (
 )
 
 type edgeGatewayFixture struct {
-	Gateway, Password, Topic, TopicID, ReceiptID string
-	Anchored                                     bool
+	Gateway, Username, Password, Topic, TopicID, ReceiptID string
+	Anchored                                               bool
 }
 
 func TestSCMHostedStackEdge(t *testing.T) {
 	fixture, path := loadSCMFixture(t)
 	evidence := loadSCMEvidence(t, path)
 	verifyGatewayInEdge(t, fixture.browser(t), edgeGatewayFixture{
-		Gateway: fixture.Gateway, Password: fixture.Password, Topic: "CAD-SCM", TopicID: evidence.TopicID,
+		Gateway: fixture.Gateway, Username: "labviewer", Password: fixture.ViewerPassword, Topic: "CAD-SCM", TopicID: evidence.TopicID,
 		ReceiptID: strings.TrimPrefix(evidence.Receipt.Path, "/bridge/api/receipts/"), Anchored: true,
 	})
 }
@@ -36,7 +36,7 @@ func verifyGatewayInEdge(t *testing.T, trustedClient *http.Client, fixture edgeG
 		t.Fatal("the live browser test requires Node.js with built-in WebSocket")
 	}
 	gateway, err := url.Parse(fixture.Gateway)
-	if err != nil || gateway.Scheme != "https" || gateway.User != nil ||
+	if err != nil || gateway.Scheme != "https" || gateway.User != nil || fixture.Username == "" || fixture.Password == "" ||
 		(gateway.Hostname() != "127.0.0.1" && gateway.Hostname() != "git.office.example") {
 		t.Fatal("the Edge login fixture must use an isolated HTTPS gateway")
 	}
@@ -66,7 +66,7 @@ func verifyGatewayInEdge(t *testing.T, trustedClient *http.Client, fixture edgeG
 	if output, err := browser.CombinedOutput(); err != nil {
 		t.Fatalf("live Edge navigation failed: %v\n%s", err, output)
 	}
-	t.Log("Edge followed both Gitea menus, completed real OAuth, rendered the original saved topic and project overview, and reopened the same receipt after a fresh sign-in.")
+	t.Log("Edge followed both Gitea menus, approved a fresh OAuth grant, rendered the original saved topic and project overview, and reopened the same receipt after a fresh sign-in.")
 }
 
 const gatewayBrowserNavigation = edgeDevTools + `
@@ -96,7 +96,7 @@ await withEdge(edge, profile, origin + '/', flags, async (evaluate, send) => {
     await evaluate(route => document.querySelector('a[href="' + route + '"]').click(), path);
   }
 
-  async function authorize(returnURL, selector) {
+  async function authorize(returnURL, selector, firstGrant = false) {
     const state = () => evaluate((site, target, field, number) => {
       if (location.origin !== site) return false;
       if (location.href === target && document.querySelector(field)?.innerText.includes(number)) return 'returned';
@@ -108,19 +108,20 @@ await withEdge(edge, profile, origin + '/', flags, async (evaluate, send) => {
     await evaluate(() => document.querySelector('#login').click());
     let step = await waitForPage('Gitea OAuth flow', state);
     if (step === 'credentials') {
-      await evaluate((site, password) => {
+      await evaluate((site, username, password) => {
         if (location.origin !== site || location.pathname !== '/user/login') throw new Error('unexpected login origin');
         const user = document.querySelector('input[name="user_name"]');
         if (new URL(user.form.action, location.href).origin !== site) throw new Error('unexpected login submission');
-        user.value = 'labreader';
+        user.value = username;
         user.form.querySelector('input[name="password"]').value = password;
         user.form.requestSubmit();
-      }, origin, config.Password);
+      }, origin, config.Username, config.Password);
       step = await waitForPage('Gitea login result', async () => {
         const result = await state();
         return result !== 'credentials' && result;
       });
     }
+    if (firstGrant && step !== 'consent') throw new Error('the new viewer did not see OAuth consent');
     if (step === 'consent') {
       await evaluate(site => {
         if (location.origin !== site) throw new Error('unexpected consent origin');
@@ -134,7 +135,7 @@ await withEdge(edge, profile, origin + '/', flags, async (evaluate, send) => {
   await wait('anonymous dashboard after menu click', site =>
     location.href === site + '/bridge/' && !!document.querySelector('#login:not([hidden])'), origin);
   await goTo(dashboard);
-  await authorize(dashboard, '#saved-topic');
+  await authorize(dashboard, '#saved-topic', true);
   await wait('saved topic repository', () => document.querySelector('#results h2')?.textContent === 'labowner/fixture');
   await wait('authenticated dashboard', () => !!document.querySelector('#overview:not([hidden])'));
   await evaluate(() => document.querySelector('#overview summary').click());

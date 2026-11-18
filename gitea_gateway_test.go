@@ -173,8 +173,10 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 		t.Fatal("authorized Markdown download does not describe the original topic")
 	}
 	if os.Getenv("BRIDGE_TEST_EDGE_BINARY") != "" {
+		_, viewerPassword := createLabUser(t, command, "labviewer", "read:repository,read:user")
+		labAPI(t, internal, admin, "PUT", "/repos/labowner/fixture/collaborators/labviewer", map[string]string{"permission": "read"}, nil, 204)
 		verifyGatewayInEdge(t, browser, edgeGatewayFixture{
-			Gateway: public, Password: password, Topic: topic.Topic, TopicID: topic.ID, ReceiptID: receiptID,
+			Gateway: public, Username: "labviewer", Password: viewerPassword, Topic: topic.Topic, TopicID: topic.ID, ReceiptID: receiptID,
 		})
 	}
 }
