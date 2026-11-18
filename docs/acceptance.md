@@ -144,6 +144,8 @@ Windows 构建和测试验证 SCM 处理器的启动、询问、停止、关机�
 
 增强验收用 Windows 服务登录令牌验证实际文件权限。Bridge 能读取收件制品，无法写入制品及自身配置，也无法打开 Gitea 数据库或独立存证账本。普通签发者在 HTTPS 入口签发该制品，回执 SHA-256 与原件匹配，独立进程的凭证与回执一起通过离线验签。Git HTTPS 也完成了私有仓克隆，克隆 SHA 与 Bridge 总览一致。[权限与交付验收记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44385352523)
 
+Windows Server 2025 VM 已实测全部停止再启动 Gitea、Caddy、Bridge 和独立存证服务。四个监听端口在停止后释放，启动后四个进程的 PID 都已更换，Caddy 根 CA 保持一致。普通协作者重新通过 HTTPS 登录，读到原联调单及版本、同一试点 PR 和 Git 分支提交。重新下载的签名回执和存证凭证与停机前逐字节一致，仍可用原公钥验签。直接向独立存证服务重放原请求也返回 `200` 和同一份凭证，确认独立账本保留了原记录。[四服务停启验收记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44388149328)
+
 可在 GitHub Actions 手动运行「Windows service lab」复验。目标主机的整机重启、实际账户和业务路径 ACL、远程网络与项目试接仍须现场验收。
 
 ## 已验证：Bridge 与独立账本空目录恢复
@@ -152,7 +154,7 @@ Windows 集成测试从真实 Gitea 签发两版回执后，干净关闭 Bridge 
 
 ## 已验证：真实进程中断后恢复待存证回执
 
-用同一 Windows 二进制分别启动 Bridge 和独立存证模式，两者使用不同的临时密钥文件和数据库。存证进程未启动时，普通 Gitea 协作者成功签发，凭证下载返回 `409`，Bridge 日志记录待重试。强制结束测试 Bridge 进程后，启动存证，再用原库启动 Bridge。客户端重新登录，找到同一回执，下载并离线验签。原签名 JSON 字节保持一致。再次重启存证进程后，重放原请求，返回的凭证字节也与首次一致。本项使用前台回环进程；SCM 自动恢复和 Windows 账户隔离仍须现场验证。
+用同一 Windows 二进制分别启动 Bridge 和独立存证模式，两者使用不同的临时密钥文件和数据库。存证进程未启动时，普通 Gitea 协作者成功签发，凭证下载返回 `409`，Bridge 日志记录待重试。强制结束测试 Bridge 进程后，启动存证，再用原库启动 Bridge。客户端重新登录，找到同一回执，下载并离线验签。原签名 JSON 字节保持一致。再次重启存证进程后，重放原请求，返回的凭证字节也与首次一致。此测试使用前台回环进程，Windows 服务验收见上文。
 
 ```powershell
 go build -o "$env:TEMP\bridge-recovery-lab.exe" ./cmd/bridge
