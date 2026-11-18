@@ -138,6 +138,20 @@ func TestGiteaLocalLab(t *testing.T) {
 	if blocked := checks[conflicting]; blocked.CI != "failure" || blocked.Conflict != "not_mergeable_reason_unknown" {
 		t.Fatalf("conflicting fixture was not distinguished from clean PR: %+v", blocked)
 	}
+	saveURL := bridgeURL + "/bridge/api/topics"
+	selection := fmt.Sprintf(`{"project_id":"lab","topic":"CAD-01","members":[{"repository_id":%d,"source_branch":"changes","target_branch":"main"}]}`, repos[1].ID)
+	postLabTopic(t, browser, saveURL, "https://untrusted.invalid", "cad-fictional", selection, 403)
+	postLabTopic(t, browser, saveURL, bridgeURL, "whole-group", `{"project_id":"lab","topic":"CAD-01"}`, 404)
+	saved := postLabTopic(t, browser, saveURL, bridgeURL, "cad-fixture", selection, 201)
+	retried := postLabTopic(t, browser, saveURL, bridgeURL, "cad-fixture", selection, 200)
+	if saved.ID == "" || saved.ID != retried.ID || saved.Version != 1 || len(saved.Members) != 1 || saved.Members[0].RepositoryID != repos[1].ID || saved.Members[0].SourceBranch != "changes" {
+		t.Fatalf("unexpected saved topic: %+v / %+v", saved, retried)
+	}
+	postLabTopic(t, browser, saveURL, bridgeURL, "cad-fixture", strings.Replace(selection, "CAD-01", "CAD-02", 1), 409)
+	savedURL := saveURL + "/" + saved.ID
+	if data := loadLabPage(t, browser, savedURL, nil, 200); !strings.Contains(data, `"name":"conflict"`) || strings.Contains(data, `"name":"merged"`) {
+		t.Fatal("saved topic did not preserve the specific repository selection")
+	}
 	api("DELETE", "/repos/labowner/conflict/collaborators/labreader", nil, nil, 204)
 	results = lookup(3)
 	if len(results) != 2 || results[1].Repository.Name != "no-match" {
@@ -146,6 +160,10 @@ func TestGiteaLocalLab(t *testing.T) {
 	if strings.Contains(loadLabPage(t, browser, lookupURL, nil, 200), `"name":"conflict"`) {
 		t.Fatal("OAuth lookup returned a repository after access was revoked")
 	}
+	if data := loadLabPage(t, browser, savedURL, nil, 404); data != loadLabPage(t, browser, saveURL+"/"+strings.Repeat("A", 43), nil, 404) {
+		t.Fatal("a revoked topic was distinguishable from an unknown topic")
+	}
+	postLabTopic(t, browser, saveURL, bridgeURL, "cad-fixture", selection, 404)
 	logout, err := http.NewRequest("POST", bridgeURL+"/bridge/auth/logout", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -164,6 +182,11 @@ func TestGiteaLocalLab(t *testing.T) {
 
 func loginLab(t *testing.T, giteaURL, ownerToken, readerPassword string, repos []Repository) (*http.Client, string) {
 	t.Helper()
+	store, err := OpenTopicStore(context.Background(), filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
 	app := httptest.NewUnstartedServer(nil)
 	bridgeURL := "http://" + app.Listener.Addr().String()
 	var creds struct {
@@ -175,7 +198,8 @@ func loginLab(t *testing.T, giteaURL, ownerToken, readerPassword string, repos [
 	}, &creds, 201)
 	handler, err := NewServer(ServerConfig{PublicBaseURL: bridgeURL + "/bridge/", GiteaPublicURL: giteaURL, GiteaAPIURL: giteaURL,
 		ClientID: creds.ID, ClientSecret: creds.Secret, AllowLoopbackHTTP: true, PageSize: 1, MaxPages: 3,
-		Projects: []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
+		TopicStore: store,
+		Projects:   []Project{{ID: "lab", Name: "Lab", Repositories: repos}, {ID: "secret", Name: "Secret", Repositories: repos[3:]}},
 	})
 	if err != nil {
 		app.Listener.Close()
@@ -217,6 +241,33 @@ func loginLab(t *testing.T, giteaURL, ownerToken, readerPassword string, repos [
 		t.Fatal("OAuth session used the wrong user or exposed a hidden project")
 	}
 	return browser, bridgeURL
+}
+
+func postLabTopic(t *testing.T, browser *http.Client, address, origin, key, body string, status int) TopicChangeSet {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, address, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", key)
+	request.Header.Set("Origin", origin)
+	response, err := browser.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != status {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 200))
+		t.Fatalf("create saved topic: wanted %d, got %d: %s", status, response.StatusCode, data)
+	}
+	var topic TopicChangeSet
+	if status < 300 {
+		if err := json.NewDecoder(response.Body).Decode(&topic); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return topic
 }
 
 func addLabCSRF(page string, form url.Values) {

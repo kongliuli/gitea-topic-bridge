@@ -4,6 +4,8 @@ const logout = document.querySelector('#logout');
 const account = document.querySelector('#account-name');
 const message = document.querySelector('#message');
 const results = document.querySelector('#results');
+const save = document.querySelector('#save-topic');
+const savedTopic = document.querySelector('#saved-topic');
 const submit = form.querySelector('button');
 const project = form.elements.namedItem('project_id');
 const topic = form.elements.namedItem('topic');
@@ -12,6 +14,8 @@ const lifecycles = { merged: '已合并', open: '开放', closed: '关闭未合�
 const checks = { success: '已报告的检查通过', pending: '等待中', warning: '警告', failure: '失败', error: '出错', skipped: '跳过', not_reported: '未报告' };
 const conflicts = { none_reported: '未报告冲突', not_mergeable_reason_unknown: 'Gitea 暂不可合并，原因未知', not_applicable: '不适用' };
 let activeQuery;
+let storeEnabled = false;
+let draft;
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -26,6 +30,10 @@ function requireLogin() {
   logout.hidden = true;
   form.hidden = true;
   account.textContent = '';
+  draft = undefined;
+  save.hidden = true;
+  savedTopic.replaceChildren();
+  savedTopic.hidden = true;
   results.replaceChildren();
   message.textContent = '先登录 Gitea，再查看你有权限的仓库。';
 }
@@ -67,6 +75,7 @@ async function lookup() {
   activeQuery = query;
   const params = new URLSearchParams(new FormData(form));
   history.replaceState(null, '', `/bridge/?${params}`);
+  clearSavedTopic();
   submit.disabled = true;
   message.textContent = '正在查找…';
   results.replaceChildren();
@@ -79,11 +88,84 @@ async function lookup() {
     }
     if (!response.ok) throw new Error('lookup failed');
     const data = await response.json();
-    if (!query.signal.aborted) showResults(data);
+    if (!query.signal.aborted) {
+      showResults(data);
+      if (storeEnabled && data.repositories.length) {
+        draft = {
+          key: crypto.randomUUID(),
+          body: JSON.stringify({ project_id: params.get('project_id'), topic: params.get('topic'), members: data.repositories.map((item) => ({ repository_id: item.repository.id })) }),
+        };
+        save.disabled = false;
+        save.hidden = false;
+      }
+    }
   } catch {
     if (!query.signal.aborted) message.textContent = '暂时查不到结果，请稍后重试。';
   } finally {
     if (activeQuery === query) submit.disabled = false;
+  }
+}
+
+function clearSavedTopic() {
+  draft = undefined;
+  save.hidden = true;
+  savedTopic.hidden = true;
+  savedTopic.replaceChildren();
+}
+
+save.addEventListener('click', async () => {
+  const submitted = draft;
+  if (!submitted) return;
+  save.disabled = true;
+  savedTopic.hidden = false;
+  savedTopic.textContent = '正在保存…';
+  try {
+    const response = await fetch('/bridge/api/topics', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': submitted.key }, body: submitted.body });
+    if (draft !== submitted) return;
+    if (response.status === 401) return requireLogin();
+    if (response.status === 404) {
+      savedTopic.textContent = '仓库权限可能已变化，请重新查询后再保存。';
+      return;
+    }
+    if (!response.ok) throw new Error('save failed');
+    const data = await response.json();
+    if (draft !== submitted) return;
+    const link = element('a', `打开联调单 ${data.topic} · v${data.version}`);
+    link.href = `/bridge/?${new URLSearchParams({ topic_id: data.id })}`;
+    savedTopic.replaceChildren(link);
+    draft = undefined;
+    save.hidden = true;
+  } catch {
+    if (draft === submitted) savedTopic.textContent = '没收到保存确认，可以重试，不会重复建单。';
+  } finally {
+    if (draft === submitted) save.disabled = false;
+  }
+});
+
+async function openSavedTopic(id) {
+  clearSavedTopic();
+  activeQuery?.abort();
+  const query = new AbortController();
+  activeQuery = query;
+  message.textContent = '正在读取联调单…';
+  try {
+    const response = await fetch(`/bridge/api/topics/${encodeURIComponent(id)}`, { signal: query.signal });
+    if (response.status === 401) return requireLogin();
+    if (response.status === 404) {
+      message.textContent = '找不到这个联调单，或你没有查看全部成员仓的权限。';
+      return;
+    }
+    if (!response.ok) throw new Error('saved topic failed');
+    const data = await response.json();
+    if (query.signal.aborted) return;
+    const repos = data.repositories;
+    showResults({ repositories: repos, complete: repos.every((item) => item.status === 'complete'), found: repos.some((item) => item.pull_requests.length), read_at: data.read_at });
+    savedTopic.hidden = false;
+    savedTopic.textContent = `联调单 ${data.topic} · v${data.version} · ${data.members.length} 个成员仓`;
+    topic.value = data.topic;
+    project.value = data.project_id;
+  } catch {
+    if (!query.signal.aborted) message.textContent = '暂时读不到保存的联调单。';
   }
 }
 
@@ -109,7 +191,10 @@ async function loadProjects() {
     if (!response.ok) throw new Error('project list failed');
     const data = await response.json();
     account.textContent = `当前账号：${data.user}`;
+    storeEnabled = data.saved_topics;
     logout.hidden = false;
+    const params = new URLSearchParams(location.search);
+    const saved = storeEnabled && /^[A-Za-z0-9_-]{43}$/.test(params.get('topic_id') ?? '') ? params.get('topic_id') : null;
     if (!data.projects.length) {
       message.textContent = '你暂时没有可查看的项目组。';
       return;
@@ -119,12 +204,15 @@ async function loadProjects() {
       option.value = item.id;
       project.append(option);
     }
-    const params = new URLSearchParams(location.search);
+    if (saved) {
+      await openSavedTopic(saved);
+      if (activeQuery?.signal.aborted) return;
+    }
     const selected = params.get('project_id');
     if (data.projects.some((item) => item.id === selected)) project.value = selected;
-    topic.value = params.get('topic') ?? '';
+    if (!saved) topic.value = params.get('topic') ?? '';
     form.hidden = false;
-    message.textContent = '选择项目组并输入需求编号。';
+    if (!saved) message.textContent = '选择项目组并输入需求编号。';
     if (selected === project.value && topic.value && form.checkValidity()) lookup();
   } catch {
     message.textContent = '暂时无法读取项目，请稍后刷新。';

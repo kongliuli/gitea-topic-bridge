@@ -3,6 +3,7 @@
   "gitea_public_url": "https://git.office.example:8443/",
   "gitea_api_url": "http://127.0.0.1:3000/",
   "client_id": "REPLACE_WITH_GITEA_OAUTH_CLIENT_ID",
+  "database_path": "C:/BridgeData/bridge.db",
   "page_size": 25,
   "max_pages": 8,
   "projects": [

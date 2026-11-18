@@ -59,21 +59,23 @@ func newUpstreamClient() *http.Client {
 	}
 }
 
-func (client *Gitea) CurrentUser(ctx context.Context) (string, error) {
-	var user struct {
-		ID    int64
-		Login string
-	}
+type GiteaUser struct {
+	ID    int64
+	Login string
+}
+
+func (client *Gitea) CurrentUser(ctx context.Context) (GiteaUser, error) {
+	var user GiteaUser
 	if _, err := client.get(ctx, client.apiBase.JoinPath("api", "v1", "user"), &user); err != nil {
 		if errors.Is(err, ErrNotVisible) {
-			return "", ErrUnauthorized
+			return GiteaUser{}, ErrUnauthorized
 		}
-		return "", err
+		return GiteaUser{}, err
 	}
 	if user.ID <= 0 || user.Login == "" {
-		return "", ErrUnauthorized
+		return GiteaUser{}, ErrUnauthorized
 	}
-	return user.Login, nil
+	return user, nil
 }
 
 func (client *Gitea) get(ctx context.Context, endpoint *url.URL, value any) (http.Header, error) {

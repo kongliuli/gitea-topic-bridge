@@ -20,3 +20,9 @@
 |POST /bridge/api/receipts；GET /bridge/api/receipts/{id}|创建快照、查看、导出 JSON/Markdown|
 
 页面使用原生 ES Modules；导航只挂“多仓联调”和“交付回执”两个链接。部署时选择并验证对应版本的导航扩展点，不覆盖整套模板；注入失效时保留 `/bridge/` 独立入口。
+
+## 已实现的保存接口
+
+配置 Bridge 独立 SQLite 后，`POST /bridge/api/topics` 接收同源 JSON 请求及 `Idempotency-Key`。请求字段为 `project_id`、`topic` 和可选的 `members`；省略 `members` 表示使用整组，显式指定时每项填写 `repository_id`，可同时填写 `source_branch` 和 `target_branch`。建单时每个成员仓都必须在项目白名单内，且创建者有读取权限。建单不创建分支或 PR。
+
+首次保存返回 `201`，同用户重试相同请求返回原联调单（`200`）；同用户用同一个键提交不同内容返回 `409`。`GET /bridge/api/topics/{id}` 返回固定成员、版本、建单人和即时查询结果；任一成员不再可访问时，整张单返回与不存在相同的 `404`。这些接口当前只创建版本 1，逐仓写入及操作结果更新仍待实现。

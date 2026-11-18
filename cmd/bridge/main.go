@@ -48,6 +48,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if config.DatabasePath != "" {
+		startup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		store, err := bridge.OpenTopicStore(startup, config.DatabasePath)
+		cancel()
+		if err != nil {
+			log.Fatalf("open Bridge database: %v", err)
+		}
+		defer store.Close()
+		config.TopicStore = store
+	}
 	handler, err := bridge.NewServer(config)
 	if err != nil {
 		log.Fatal(err)

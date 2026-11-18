@@ -101,7 +101,9 @@ func (server *Server) startLogin(writer http.ResponseWriter, request *http.Reque
 	verifier, verifierErr := randomID()
 	returnQuery := url.Values{}
 	query := request.URL.Query()
-	if projectID.MatchString(query.Get("project_id")) && topicPattern.MatchString(query.Get("topic")) {
+	if topicIDPattern.MatchString(query.Get("topic_id")) {
+		returnQuery.Set("topic_id", query.Get("topic_id"))
+	} else if projectID.MatchString(query.Get("project_id")) && topicPattern.MatchString(query.Get("topic")) {
 		returnQuery.Set("project_id", query.Get("project_id"))
 		returnQuery.Set("topic", query.Get("topic"))
 	}
@@ -189,9 +191,16 @@ func (server *Server) finishLogin(writer http.ResponseWriter, request *http.Requ
 	http.Redirect(writer, request, location, http.StatusSeeOther)
 }
 
-func (server *Server) logout(writer http.ResponseWriter, request *http.Request) {
+func (server *Server) checkOrigin(writer http.ResponseWriter, request *http.Request) bool {
 	if request.Header.Get("Origin") != server.public.Scheme+"://"+server.public.Host {
 		responseProblem(writer, http.StatusForbidden, "invalid_origin")
+		return false
+	}
+	return true
+}
+
+func (server *Server) logout(writer http.ResponseWriter, request *http.Request) {
+	if !server.checkOrigin(writer, request) {
 		return
 	}
 	server.sessions.get(cookieValue(request, sessionCookie), true)

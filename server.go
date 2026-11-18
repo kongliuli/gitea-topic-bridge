@@ -20,15 +20,17 @@ type Project struct {
 }
 
 type ServerConfig struct {
-	PublicBaseURL     string    `json:"public_base_url"`
-	GiteaPublicURL    string    `json:"gitea_public_url"`
-	GiteaAPIURL       string    `json:"gitea_api_url"`
-	ClientID          string    `json:"client_id"`
-	ClientSecret      string    `json:"-"`
-	AllowLoopbackHTTP bool      `json:"allow_loopback_http"`
-	PageSize          int       `json:"page_size"`
-	MaxPages          int       `json:"max_pages"`
-	Projects          []Project `json:"projects"`
+	PublicBaseURL     string      `json:"public_base_url"`
+	GiteaPublicURL    string      `json:"gitea_public_url"`
+	GiteaAPIURL       string      `json:"gitea_api_url"`
+	ClientID          string      `json:"client_id"`
+	ClientSecret      string      `json:"-"`
+	DatabasePath      string      `json:"database_path"`
+	TopicStore        *TopicStore `json:"-"`
+	AllowLoopbackHTTP bool        `json:"allow_loopback_http"`
+	PageSize          int         `json:"page_size"`
+	MaxPages          int         `json:"max_pages"`
+	Projects          []Project   `json:"projects"`
 }
 
 type Server struct {
@@ -83,6 +85,10 @@ func NewServer(config ServerConfig) (http.Handler, error) {
 	mux.HandleFunc("POST /bridge/auth/logout", server.logout)
 	mux.HandleFunc("GET /bridge/api/projects", server.withUser(server.listProjects))
 	mux.HandleFunc("GET /bridge/api/topics/lookup", server.withUser(server.lookupTopic))
+	if config.TopicStore != nil {
+		mux.HandleFunc("POST /bridge/api/topics", server.withUser(server.createTopic))
+		mux.HandleFunc("GET /bridge/api/topics/{id}", server.withUser(server.getTopic))
+	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("Referrer-Policy", "no-referrer")
@@ -113,7 +119,7 @@ func responseProblem(writer http.ResponseWriter, status int, code string) {
 	responseJSON(writer, status, map[string]string{"error": code})
 }
 
-func (server *Server) withUser(handler func(http.ResponseWriter, *http.Request, *Gitea, string)) http.HandlerFunc {
+func (server *Server) withUser(handler func(http.ResponseWriter, *http.Request, *Gitea, GiteaUser)) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		sessionID := cookieValue(request, sessionCookie)
 		token, ok := server.sessions.get(sessionID, false)
@@ -150,7 +156,7 @@ func (server *Server) upstreamProblem(writer http.ResponseWriter, request *http.
 	responseProblem(writer, http.StatusBadGateway, "upstream_unavailable")
 }
 
-func (server *Server) listProjects(writer http.ResponseWriter, request *http.Request, client *Gitea, user string) {
+func (server *Server) listProjects(writer http.ResponseWriter, request *http.Request, client *Gitea, user GiteaUser) {
 	type projectSummary struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -176,12 +182,13 @@ func (server *Server) listProjects(writer http.ResponseWriter, request *http.Req
 		}
 	}
 	responseJSON(writer, http.StatusOK, struct {
-		User     string           `json:"user"`
-		Projects []projectSummary `json:"projects"`
-	}{user, projects})
+		User        string           `json:"user"`
+		Projects    []projectSummary `json:"projects"`
+		SavedTopics bool             `json:"saved_topics"`
+	}{user.Login, projects, server.config.TopicStore != nil})
 }
 
-func (server *Server) lookupTopic(writer http.ResponseWriter, request *http.Request, client *Gitea, _ string) {
+func (server *Server) lookupTopic(writer http.ResponseWriter, request *http.Request, client *Gitea, _ GiteaUser) {
 	query := request.URL.Query()
 	topic := query.Get("topic")
 	if !projectID.MatchString(query.Get("project_id")) || !topicPattern.MatchString(topic) {
