@@ -1,0 +1,13 @@
+anchor.office.example:8443 {
+    tls internal
+    @append {
+        method POST
+        path /v1/anchors
+    }
+    handle @append {
+        reverse_proxy 127.0.0.1:3003
+    }
+    handle {
+        respond 404
+    }
+}

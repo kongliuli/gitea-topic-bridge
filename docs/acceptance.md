@@ -80,6 +80,13 @@ go test -v -timeout 3m -run '^TestGiteaPullMirrorLab$' -count=1 ./...
 
 本地集成测试通过独立 HTTP 入口、签名密钥及账本数据库获取存证凭证，并将其与签名回执一起离线核验；撤权后凭证下载同样返回 `404`。故障测试模拟账本写入后丢失成功响应，Bridge 数据库重开后重新取回原凭证；验证摘要替换、篡改凭证和通过应用账本连接修改旧记录均失败。不同服务账户的 ACL、独立主机 HTTPS 和存储管理员权限隔离仍须部署验收。
 
+另用真实 Caddy 验证独立 HTTPS 网关。网关只转发 `POST /v1/anchors`。没有信任临时 CA 或凭据错误时，账本保持空白。配置正确 CA 与凭据后，Bridge 存证客户端收到可离线验签的凭证，重复提交返回相同字节。测试使用独立回环监听和临时 CA。
+
+```powershell
+$env:BRIDGE_TEST_CADDY_BINARY = 'C:\path\to\caddy.exe'
+go test -v -run '^TestIndependentAnchorHTTPS$' -count=1 ./...
+```
+
 ## 已验证：网页回执中心
 
 使用临时 Edge 配置和模拟 HTTP 接口验证详情、未核验标记、版本列表、更正入口与下载链接。另实测填入制品路径、发布 ID 和 SHA，点击确认签发，验证提交内容和幂等键，随后跳到新回执并显示「独立存证待确认」。真实 Gitea 另验证签发、OAuth 读取两版历史和各格式，撤权后历史同样返回 `404`。生产环境的签发与独立存证待现场验收。

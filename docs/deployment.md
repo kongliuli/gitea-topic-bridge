@@ -79,6 +79,8 @@ Start-Service -Name GiteaTopicBridge
 
 在 Bridge 的 `receipts` 顶层配置内增加 `"anchor":{"url":"https://anchor.example.com/v1/anchors","public_key":"<可信存证公钥Base64>"}`，只经独立网关转发该 POST 路由，不将存证服务挂在 Gitea 公共网关。使用有效证书，并在 Bridge 的安全环境设置相同的 `BRIDGE_ANCHOR_BEARER`。HTTP 仅允许显式回环 IP，适合本机实验。应用层只支持追加；对能修改存证数据库文件或拥有存证私钥的管理员不承诺防篡改，请隔离运维权限并单独做受保护备份。
 
+独立网关可使用 [Caddyfile.anchor](../examples/Caddyfile.anchor)。样例用内部 CA，部署时替换主机名和端口，按网络策略只允许 Bridge 访问。使用系统已信任的证书时，保留默认的系统信任库。使用独立内部 CA 时，在 `anchor` 中额外配置 `"ca_file":"C:/Bridge/config/anchor-ca.pem"`，填写只读的本机 PEM CA 文件。Bridge 对存证 HTTPS 仅使用这份证书包，并继续校验主机名。更新 CA 后重启 Bridge；`public_key` 仍须填独立 Ed25519 存证公钥，用来验证凭证签名。
+
 独立凭证从 `GET /bridge/api/receipts/{id}?format=proof` 下载，有仓库权限且验证通过才返回。离线核验时为原有验签命令再加 `-anchor-proof receipt.proof.json -trusted-anchor-key <可信存证公钥Base64>`。不要只信 Markdown 状态或放在回执旁边的公钥。
 
 ## 运维约束

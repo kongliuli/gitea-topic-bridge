@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,12 +13,16 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
 type ReceiptAnchorConfig struct {
 	URL       string `json:"url"`
 	PublicKey string `json:"public_key"`
+	CAFile    string `json:"ca_file,omitempty"`
 	Bearer    string `json:"-"`
 }
 
@@ -36,7 +42,44 @@ func newAnchorClient(config ReceiptAnchorConfig, issuer ed25519.PublicKey) (*anc
 	if err != nil || issuer.Equal(public) {
 		return nil, errors.New("configure a distinct trusted Ed25519 anchor key")
 	}
-	return &anchorClient{endpoint, public, config.Bearer, newUpstreamClient()}, nil
+	client := newUpstreamClient()
+	if config.CAFile != "" {
+		if endpoint.Scheme != "https" {
+			return nil, errors.New("anchor CA file requires HTTPS")
+		}
+		roots, err := anchorTLSRoots(config.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		transport := &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: &tls.Config{RootCAs: roots},
+		}
+		client.Transport = transport
+	}
+	return &anchorClient{endpoint, public, config.Bearer, client}, nil
+}
+
+func anchorTLSRoots(path string) (*x509.CertPool, error) {
+	if !filepath.IsAbs(path) || strings.HasPrefix(filepath.ToSlash(path), "//") {
+		return nil, errors.New("anchor CA file must use an absolute local path")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("anchor CA file must be a readable regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("anchor CA file must be a readable regular file")
+	}
+	defer file.Close()
+	const maxBundle = 1 << 20
+	pem, err := io.ReadAll(io.LimitReader(file, maxBundle+1))
+	roots := x509.NewCertPool()
+	if err != nil || len(pem) > maxBundle || !roots.AppendCertsFromPEM(pem) {
+		return nil, errors.New("anchor CA file must contain a PEM certificate bundle of at most 1 MiB")
+	}
+	return roots, nil
 }
 
 func (client *anchorClient) append(ctx context.Context, statement anchorStatement) ([]byte, string) {

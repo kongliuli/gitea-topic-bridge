@@ -202,12 +202,18 @@ func issueTLSLabReceipt(t *testing.T, browser *http.Client, public, topic string
 
 func startLabCaddy(t *testing.T, binary, gateway, dialAddress, gitea, bridge string) (string, *http.Client) {
 	t.Helper()
-	dir := t.TempDir()
-	storage := filepath.Join(dir, "storage")
 	data, err := os.ReadFile("examples/Caddyfile")
 	if err != nil {
 		t.Fatal(err)
 	}
+	config := strings.NewReplacer("git.office.example:8443", gateway, "127.0.0.1:3000", strings.TrimPrefix(gitea, "http://"), "127.0.0.1:3001", bridge).Replace(string(data))
+	return startLabTLSCaddy(t, binary, gateway, dialAddress, config, "/bridge/", 200)
+}
+
+func startLabTLSCaddy(t *testing.T, binary, gateway, dialAddress, siteConfig, readyPath string, readyStatus int) (string, *http.Client) {
+	t.Helper()
+	dir := t.TempDir()
+	storage := filepath.Join(dir, "storage")
 	config := fmt.Sprintf(`{
 	admin off
 	persist_config off
@@ -222,8 +228,7 @@ func startLabCaddy(t *testing.T, binary, gateway, dialAddress, gitea, bridge str
 	}
 }
 `, filepath.ToSlash(storage))
-	config += strings.NewReplacer("git.office.example:8443", gateway, "127.0.0.1:3000", strings.TrimPrefix(gitea, "http://"), "127.0.0.1:3001", bridge).Replace(string(data))
-	logPath := runLabCaddy(t, binary, dir, config)
+	logPath := runLabCaddy(t, binary, dir, config+siteConfig)
 	ca := filepath.Join(storage, "pki", "authorities", "local", "root.crt")
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -245,7 +250,15 @@ func startLabCaddy(t *testing.T, binary, gateway, dialAddress, gitea, bridge str
 			pem, _ := os.ReadFile(ca)
 			installed = roots.AppendCertsFromPEM(pem)
 		}
-		return installed && labCaddyReady(client, "https://"+gateway+"/bridge/")
+		if !installed {
+			return false
+		}
+		response, err := client.Get("https://" + gateway + readyPath)
+		if err != nil {
+			return false
+		}
+		response.Body.Close()
+		return response.StatusCode == readyStatus
 	})
 	return ca, client
 }
