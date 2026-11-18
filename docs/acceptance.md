@@ -46,7 +46,9 @@ go test -v -timeout 3m -run '^TestGiteaRunnerLab$' -count=1 ./...
 
 ## 已验证：公开上游拉取镜像
 
-Windows 回环 Gitea v28.4.0 继承实验会话的 HTTPS 出站设置，从 [octocat/Hello-World](https://github.com/octocat/Hello-World) 建立私有 Pull Mirror。确认镜像有原始提交、Bridge 总览与 Git 克隆的 SHA 一致，手动请求同步后 Gitea 更新最后同步时间。普通协作者有仓库写权限，但推送新分支收到镜像只读错误，随后查询远端确认该分支未出现。生产服务账号的 github443 路径仍须在目标机器复验。
+Windows 回环 Gitea v28.4.0 继承实验会话的 HTTPS 出站设置，从 [octocat/Hello-World](https://github.com/octocat/Hello-World) 建立私有 Pull Mirror。确认镜像有原始提交、Bridge 总览与 Git 克隆的 SHA 一致，手动请求同步后 Gitea 更新最后同步时间。普通协作者有仓库写权限，但推送新分支收到镜像只读错误，随后查询远端确认该分支未出现。
+
+同一用例也在 Windows Server 2025 VM 的 Gitea 专用服务账号下通过。测试启用严格迁移白名单 `github.com:443`，确认名单外的实验地址被拒绝且未建仓。名单内的镜像能拉取并同步，普通协作者通过 Caddy HTTPS 克隆后确认提交一致，推送则被 Gitea 拒绝。目标机器实际使用的 `github443` 代理或 SSH 别名仍须按现场配置复验。[Windows 服务镜像验收](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44391931719)
 
 ```powershell
 $env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
