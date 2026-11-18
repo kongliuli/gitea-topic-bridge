@@ -1,0 +1,33 @@
+name: Windows service lab
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/windows-service-lab]
+    paths:
+      - .github/workflows/windows-service-lab.yml
+      - examples/Register-BridgeService.ps1
+      - tests/windows-service-lab.ps1
+      - '**.go'
+
+permissions:
+  contents: read
+
+jobs:
+  scm:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build Windows binary
+        shell: pwsh
+        run: go build -trimpath -o "$env:RUNNER_TEMP\bridge-scm-lab.exe" ./cmd/bridge
+      - name: Exercise Service Control Manager
+        shell: pwsh
+        run: .\tests\windows-service-lab.ps1 -Executable "$env:RUNNER_TEMP\bridge-scm-lab.exe"
