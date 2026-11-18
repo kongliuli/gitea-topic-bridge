@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -64,6 +65,68 @@ func TestProjectOverviewEdge(t *testing.T) {
 		if !strings.Contains(rendered, expected) {
 			t.Errorf("project overview did not render %q", expected)
 		}
+	}
+}
+
+func TestForkSelectionEdge(t *testing.T) {
+	edge := edgeForTest(t)
+	page, err := fs.ReadFile(site, "web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /bridge/{$}", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		writer.Write([]byte(strings.Replace(string(page), "</head>", `<script type="module" src="/bridge/fork-test.js"></script></head>`, 1)))
+	})
+	mux.HandleFunc("GET /bridge/fork-test.js", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/javascript")
+		writer.Write([]byte(`
+const results = document.querySelector('#results');
+const observer = new MutationObserver(selectFork);
+observer.observe(results, { childList: true });
+selectFork();
+function selectFork() {
+  const source = results.querySelector('fieldset select');
+  if (!source) return;
+  observer.disconnect();
+  source.value = '5';
+  for (const branch of results.querySelectorAll('fieldset input[type=text]')) branch.value = 'main';
+  document.querySelector('#save-topic').click();
+}
+`))
+	})
+	mux.HandleFunc("GET /bridge/app.js", serveAsset("app.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /bridge/style.css", serveAsset("style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /bridge/api/projects", func(writer http.ResponseWriter, _ *http.Request) {
+		responseJSON(writer, 200, json.RawMessage(`{"user":"fixture","projects":[{"id":"lab","name":"Lab"}],"pull_creation":true,"saved_topics":true}`))
+	})
+	mux.HandleFunc("GET /bridge/api/topics/lookup", func(writer http.ResponseWriter, _ *http.Request) {
+		responseJSON(writer, 200, json.RawMessage(`{"repositories":[{"repository":{"id":3,"owner":"base","name":"target"},"status":"complete","pull_requests":[]}],"complete":true,"found":false}`))
+	})
+	mux.HandleFunc("GET /bridge/api/projects/lab/forks", func(writer http.ResponseWriter, _ *http.Request) {
+		responseJSON(writer, 200, []ProjectFork{{TargetID: 3, Source: Repository{ID: 5, Owner: "dev", Name: "fork"}}})
+	})
+	mux.HandleFunc("POST /bridge/api/topics", func(writer http.ResponseWriter, request *http.Request) {
+		var input struct {
+			Members []TopicMember
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil || len(input.Members) != 1 {
+			t.Errorf("unexpected topic request: %v", err)
+			writer.WriteHeader(400)
+			return
+		}
+		member := input.Members[0]
+		if member.RepositoryID != 3 || member.SourceRepositoryID != 5 || member.SourceBranch != "main" || member.TargetBranch != "main" ||
+			request.Header.Get("Idempotency-Key") == "" {
+			t.Errorf("fork selection did not submit the selected source and both branch names: %+v", member)
+			writer.WriteHeader(400)
+			return
+		}
+		responseJSON(writer, 201, TopicChangeSet{ID: strings.Repeat("A", 43), Topic: "CAD-FORK", Version: 1})
+	})
+	if rendered := dumpBrowserPage(t, edge, mux, "/bridge/?project_id=lab&topic=CAD-FORK"); !strings.Contains(rendered, "打开联调单 CAD-FORK · v1") {
+		t.Fatal("selecting a fork and saving did not render a link to the new batch")
 	}
 }
 

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLookupDoesNotExposeUnverifiedForkPulls(t *testing.T) {
@@ -34,7 +37,7 @@ func TestLookupDoesNotExposeUnverifiedForkPulls(t *testing.T) {
 	}
 }
 
-func verifyForkLab(t *testing.T, base, ownerToken, forkToken, forkPassword string, repos []Repository) {
+func verifyForkLab(t *testing.T, base, ownerToken, forkToken, forkPassword string, repos []Repository, command func(...string) *exec.Cmd) {
 	t.Helper()
 	target := repos[2]
 	owner := func(method, path string, data, out any, status int) {
@@ -87,6 +90,48 @@ func verifyForkLab(t *testing.T, base, ownerToken, forkToken, forkPassword strin
 	if got := loadLabPage(t, browser, topicURL, nil, 200); !strings.Contains(got, "CAD-FORK") || !strings.Contains(got, fmt.Sprintf(`"source_repository_id":%d`, source.ID)) {
 		t.Fatal("saved Fork topic was not displayed to its author")
 	}
+	mergeURL := fmt.Sprintf("%s/members/%d/merge", topicURL, member.ID)
+	decision := fmt.Sprintf(`{"confirm":true,"expected_head":%q}`, actual.Head.SHA)
+	postLabTopic(t, browser, mergeURL, address, "", decision, 403)
+	maintainerToken, maintainerPassword := createLabUser(t, command, "labmaintainer", "write:repository,read:user")
+	owner("PUT", root+"/collaborators/labmaintainer", map[string]string{"permission": "write"}, nil, 204)
+	labAPI(t, base, forkToken, "PUT", sourcePath+"/collaborators/labmaintainer", map[string]string{"permission": "read"}, nil, 204)
+	var forkAccess struct{ Permissions struct{ Pull, Push bool } }
+	labAPI(t, base, maintainerToken, "GET", sourcePath, nil, &forkAccess, 200)
+	if !forkAccess.Permissions.Pull || forkAccess.Permissions.Push {
+		t.Fatal("fixture maintainer must have read-only access to the fork")
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintainer := &http.Client{Jar: jar, Timeout: 15 * time.Second}
+	authorizeLabBrowser(t, maintainer, base, address, "labmaintainer", maintainerPassword)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var pull struct{ Mergeable bool }
+		owner("GET", pullPath, nil, &pull, 200)
+		if pull.Mergeable {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cross-fork PR never finished Gitea merge checks")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	unapproved := postLabTopic(t, maintainer, mergeURL, address, "", decision, 200).Members[0].Merge
+	if unapproved == nil || unapproved.ResultCode != "approval_missing" {
+		t.Fatalf("cross-fork PR skipped approval: %+v", unapproved)
+	}
+	owner("POST", pullPath+"/reviews", map[string]string{"event": "APPROVED", "body": "Synthetic fork approval"}, nil, 200)
+	owner("POST", root+"/statuses/"+actual.Head.SHA, map[string]string{"state": "success", "context": "fixture/required"}, nil, 201)
+	merged := postLabTopic(t, maintainer, mergeURL, address, "", decision, 200).Members[0].Merge
+	var evidence mergePullDetail
+	owner("GET", pullPath, nil, &evidence, 200)
+	if merged == nil || merged.State != "merged" || merged.MergeSHA != evidence.MergeSHA || merged.MergedBy != evidence.MergedBy.ID {
+		t.Fatalf("verified cross-fork merge evidence did not match Gitea: %+v", merged)
+	}
+	owner("GET", root+"/contents/cross-fork.txt?ref=main", nil, nil, 200)
 	labAPI(t, base, forkToken, "DELETE", sourcePath, nil, nil, 204)
 	loadLabPage(t, browser, topicURL, nil, 404)
 	postLabTopic(t, browser, api+"/topics", address, "fork", selection(source.ID), 404)

@@ -407,7 +407,7 @@ func TestGiteaLocalLab(t *testing.T) {
 	loadLabPage(t, browser, lookupURL, nil, 401)
 	checkHookLab(t, hookStore, "pull_request", repos[0].ID, merged, actualMerge.SHA, "")
 	checkHookLab(t, hookStore, "release", repos[0].ID, release.ID, actualMerge.SHA, "build/v1")
-	verifyForkLab(t, base, ownerToken, forkToken, forkPassword, repos)
+	verifyForkLab(t, base, ownerToken, forkToken, forkPassword, repos, command)
 	recovery.verifyRestored(t)
 }
 
