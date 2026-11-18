@@ -1,6 +1,6 @@
 # Gitea Topic Bridge
 
-Windows 自建 Git 服务的多仓联调与交付回执扩展。Gitea 管单仓权限；Bridge 汇总多仓 PR。**当前支持联调单、逐仓合并、反向 PR、内部 Webhook，以及可选的网页回执中心、签发、导出和独立存证。** 跨 Fork 提交、Gitea 菜单接入和 Windows 服务安装仍待实现。
+Windows 自建 Git 服务的多仓联调与交付回执扩展。Gitea 管单仓权限；Bridge 汇总多仓 PR。**当前支持联调单、逐仓合并、反向 PR、内部 Webhook，以及可选的网页回执中心、签发、导出和独立存证。** 提供 Gitea 菜单扩展片段；跨 Fork 提交和 Windows 服务安装仍待实现。
 
 运行 `go test ./...` 可验证核心与模拟 HTTP 流程。真实 Gitea 测试和版本见[验收记录](docs/acceptance.md#已验证本地只读查询)，实际启动参数见[部署说明](docs/deployment.md#启动看板)。
 

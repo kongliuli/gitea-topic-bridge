@@ -33,6 +33,12 @@ func TestGiteaLocalLab(t *testing.T) {
 	internal := httptest.NewUnstartedServer(nil)
 	t.Cleanup(internal.Close)
 	base, command := startLocalGitea(t, binary, internal.Listener.Addr().String())
+	home := loadLabPage(t, &http.Client{Timeout: 10 * time.Second}, base+"/", nil, 200)
+	for _, item := range []string{`href="/bridge/">多仓联调</a>`, `href="/bridge/receipts/">交付回执</a>`} {
+		if strings.Count(home, item) != 1 {
+			t.Fatalf("Gitea did not render exactly one extension link %q", item)
+		}
+	}
 	createUser := func(name, scopes string, opts ...string) (string, string) {
 		t.Helper()
 		args := []string{"admin", "user", "create", "--username", name, "--email", name + "@example.invalid", "--random-password", "--must-change-password=false", "--access-token", "--access-token-name", "bridge-lab", "--access-token-scopes", scopes}
@@ -574,6 +580,17 @@ func loadLabPage(t *testing.T, browser *http.Client, address string, form url.Va
 func startLocalGitea(t *testing.T, binary, webhookAddress string) (string, func(...string) *exec.Cmd) {
 	t.Helper()
 	root := t.TempDir()
+	override := filepath.Join(root, "custom", "templates", "custom")
+	if err := os.MkdirAll(override, 0700); err != nil {
+		t.Fatal(err)
+	}
+	linkTemplate, err := os.ReadFile("examples/gitea/extra_links.tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(override, "extra_links.tmpl"), linkTemplate, 0600); err != nil {
+		t.Fatal(err)
+	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
