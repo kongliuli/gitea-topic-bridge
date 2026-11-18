@@ -300,12 +300,16 @@ LEVEL = warn
     Wait-LabGitea $giteaUrl $giteaLog
     $owner = New-GiteaLabUser $giteaApp $giteaFlags 'labowner' 'all'
     $reader = New-GiteaLabUser $giteaApp $giteaFlags 'labreader' 'read:repository,read:user'
+    $developer = New-GiteaLabUser $giteaApp $giteaFlags 'labdeveloper' 'write:repository,read:user'
     $api = @{
         Headers = @{ Authorization = "Bearer $($owner.Token)" }; ContentType = 'application/json'
         TimeoutSec = 15; NoProxy = $true
     }
     $repo = Invoke-RestMethod @api -Method Post -Uri "$giteaUrl/api/v1/user/repos" -Body '{"name":"fixture","private":true,"auto_init":true,"default_branch":"main"}'
+    $pilot = Invoke-RestMethod @api -Method Post -Uri "$giteaUrl/api/v1/user/repos" -Body '{"name":"pilot","private":true,"default_branch":"main"}'
     $null = Invoke-RestMethod @api -Method Put -Uri "$giteaUrl/api/v1/repos/labowner/fixture/collaborators/labreader" -Body '{"permission":"read"}'
+    $null = Invoke-RestMethod @api -Method Put -Uri "$giteaUrl/api/v1/repos/labowner/pilot/collaborators/labreader" -Body '{"permission":"read"}'
+    $null = Invoke-RestMethod @api -Method Put -Uri "$giteaUrl/api/v1/repos/labowner/pilot/collaborators/labdeveloper" -Body '{"permission":"write"}'
     $oauthBody = @{ name='Bridge SCM lab'; confidential_client=$true; redirect_uris=@("$gatewayUrl/bridge/auth/callback") }
     $oauth = Invoke-RestMethod @api -Method Post -Uri "$giteaUrl/api/v1/user/applications/oauth2" -Body ($oauthBody | ConvertTo-Json -Compress)
     $issuer = Invoke-RestMethod -NoProxy -TimeoutSec 10 -Uri "$giteaUrl/api/v1/user" -Headers @{ Authorization = "Bearer $($reader.Token)" }
@@ -358,7 +362,10 @@ LEVEL = warn
         gitea_api_url = "$giteaUrl/"; client_id = $oauth.client_id
         database_path = Join-Path $bridgeRoot 'bridge.sqlite3'
         page_size = 5; max_pages = 2
-        projects = @(@{ id='lab'; name='Lab'; repositories=@(@{ id=$repo.id; owner='labowner'; name='fixture' }) })
+        projects = @(
+            @{ id='lab'; name='Lab'; repositories=@(@{ id=$repo.id; owner='labowner'; name='fixture' }) }
+            @{ id='pilot'; name='Pilot'; repositories=@(@{ id=$pilot.id; owner='labowner'; name='pilot' }) }
+        )
         receipts = @{
             artifact_root = $inbox; snapshot_root = $snapshots; issuers = @($issuer.id)
             anchor = @{ url = "$anchorUrl/v1/anchors"; public_key = $anchorKey.Groups[1].Value }
@@ -405,6 +412,8 @@ LEVEL = warn
     @{
         gateway = $gatewayUrl; ca = Join-Path $caddyRoot 'storage/pki/authorities/local/root.crt'
         repository_id = $repo.id; password = $reader.Password; anchor_public_key = $anchorKey.Groups[1].Value
+        gitea_api = $giteaUrl; owner_token = $owner.Token; owner_password = $owner.Password
+        developer_token = $developer.Token; pilot_id = $pilot.id
     } | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
     & go test -v -timeout 2m -run '^TestSCMHostedStack$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted stack did not pass HTTPS acceptance.' }

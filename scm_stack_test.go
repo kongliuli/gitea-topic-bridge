@@ -25,11 +25,7 @@ func TestSCMHostedStack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fixture struct {
-		Gateway, CA, Password string
-		RepositoryID          int64  `json:"repository_id"`
-		AnchorPublicKey       string `json:"anchor_public_key"`
-	}
+	var fixture scmStackFixture
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal("invalid SCM stack fixture JSON")
 	}
@@ -79,10 +75,7 @@ func TestSCMHostedStack(t *testing.T) {
 		t.Fatal("the protected Gitea page did not advertise the canonical Git HTTPS URL")
 	}
 	clone := t.TempDir()
-	output, err := labGit(t, clone, public, "labreader", fixture.Password,
-		"-c", "http.sslVerify=true", "-c", "http.sslCAInfo="+fixture.CA, "-c", "http.sslBackend=schannel",
-		"-c", "http.schannelUseSSLCAInfo=true", "-c", "http.schannelCheckRevoke=false",
-		"clone", "--branch", "main", repoURL, ".")
+	output, err := fixture.git(t, clone, "labreader", fixture.Password, "clone", "--branch", "main", repoURL, ".")
 	if err != nil {
 		t.Fatalf("private Git HTTPS clone through the SCM gateway: %v\n%s", err, output)
 	}
@@ -99,6 +92,25 @@ func TestSCMHostedStack(t *testing.T) {
 		t.Fatalf("public gateway accepted the internal webhook: %d", response.StatusCode)
 	}
 	t.Log("Gitea, Caddy and Bridge under SCM passed canonical HTTPS, private Git and OAuth verification.")
+	verifySCMPilot(t, browser, fixture)
+}
+
+type scmStackFixture struct {
+	Gateway, CA, Password string
+	RepositoryID          int64  `json:"repository_id"`
+	AnchorPublicKey       string `json:"anchor_public_key"`
+	GiteaAPI              string `json:"gitea_api"`
+	OwnerToken            string `json:"owner_token"`
+	OwnerPassword         string `json:"owner_password"`
+	DeveloperToken        string `json:"developer_token"`
+	PilotID               int64  `json:"pilot_id"`
+}
+
+func (fixture scmStackFixture) git(t *testing.T, dir, user, password string, args ...string) (string, error) {
+	t.Helper()
+	tls := []string{"-c", "http.sslVerify=true", "-c", "http.sslCAInfo=" + fixture.CA, "-c", "http.sslBackend=schannel",
+		"-c", "http.schannelUseSSLCAInfo=true", "-c", "http.schannelCheckRevoke=false"}
+	return labGit(t, dir, fixture.Gateway, user, password, append(tls, args...)...)
 }
 
 func verifySCMReceipt(t *testing.T, browser *http.Client, public, topic string, repoID int64, anchorKey string) {
