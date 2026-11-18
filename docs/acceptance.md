@@ -181,3 +181,7 @@ go test -v -timeout 3m -run '^TestGiteaColdRestoreLab$' -count=1 ./...
 $env:BRIDGE_TEST_GITEA_BINARY = 'C:\path\to\gitea-28.4.0-windows-amd64.exe'
 go test -v -timeout 3m -run '^TestGiteaPilotMigrationLab$' -count=1 ./...
 ```
+
+## 已验证：公开项目历史试接
+
+在一次性 Windows 服务实验中，将本项目公开 `main` 的完整历史复制到临时私有 Gitea 仓。源版本为 `4b0fd0d`，包含 43 个提交且无标签。通过真实 Caddy HTTPS 导入、对比对象 ID，并由只读协作者克隆核对提交数量。给新仓配置主干保护后，普通开发者创建试点 PR，只读协作者在 Bridge 查到同一 PR 编号和 head SHA。迁移操作只向临时 Gitea 仓写入，源检查副本的引用保持原样。真实业务项目及切换仍需在目标部署上验收。[试接运行记录](https://github.com/kongliuli/gitea-topic-bridge/actions/runs/44386591492)
