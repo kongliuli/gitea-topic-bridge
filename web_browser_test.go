@@ -287,62 +287,93 @@ function submitReceipt() {
 
 // Browser CLI DOM snapshots stop at the first document. DevTools lets this
 // check wait for the new document after submitting the form.
-const receiptBrowserNavigation = `
+const edgeDevTools = `
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-const [edge, profile, url, receiptID] = process.argv.slice(1);
-const browser = spawn(edge, ['--headless=new', '--disable-gpu', '--no-first-run',
-  '--disable-background-networking', '--remote-debugging-port=0',
-  '--user-data-dir=' + profile, url], { windowsHide: true, stdio: 'ignore' });
-browser.on('error', error => console.error(error.message));
-let socket;
-try {
-  let target;
-  for (let i = 0; i < 120 && !target; i++) {
-    const portFile = await readFile(join(profile, 'DevToolsActivePort'), 'utf8').catch(() => '');
-    const port = portFile.split('\n')[0].trim();
-    if (/^[0-9]+$/.test(port)) {
-      const pages = await fetch('http://127.0.0.1:' + port + '/json/list').then(res => res.json()).catch(() => []);
-      target = pages.find(page => page.type === 'page');
-    }
-    if (!target) await delay(100);
-  }
-  if (!target) throw new Error('no headless Edge page');
-  socket = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    socket.addEventListener('open', resolve, { once: true });
-    socket.addEventListener('error', reject, { once: true });
-  });
-  let matched = false;
-  for (let id = 1; id <= 100 && !matched; id++) {
-    const value = await new Promise(resolve => {
-      function receive(event) {
-        const reply = JSON.parse(event.data);
-        if (reply.id !== id) return;
-        socket.removeEventListener('message', receive);
-        resolve(reply.result?.result?.value);
+
+async function withEdge(edge, profile, url, flags, check) {
+  const browser = spawn(edge, ['--headless=new', '--disable-gpu', '--no-first-run',
+    '--disable-background-networking', '--remote-debugging-port=0', '--no-proxy-server',
+    '--user-data-dir=' + profile, ...flags, url], { windowsHide: true, stdio: 'ignore' });
+  browser.on('error', error => console.error(error.message));
+  let socket;
+  try {
+    let target;
+    for (let i = 0; i < 120 && !target; i++) {
+      const portFile = await readFile(join(profile, 'DevToolsActivePort'), 'utf8').catch(() => '');
+      const port = portFile.split('\n')[0].trim();
+      if (/^[0-9]+$/.test(port)) {
+        const pages = await fetch('http://127.0.0.1:' + port + '/json/list', {
+          signal: AbortSignal.timeout(1000)
+        }).then(res => res.json()).catch(() => []);
+        target = pages.find(page => page.type === 'page');
       }
-      socket.addEventListener('message', receive);
-      socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: {
-        expression: 'new URLSearchParams(location.search).get("id") === ' + JSON.stringify(receiptID) +
-          ' && document.querySelector("#receipt")?.innerText.includes("独立存证待确认")',
-        returnByValue: true
-      }}));
+      if (!target) await delay(100);
+    }
+    if (!target) throw new Error('no headless Edge page');
+    socket = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('DevTools connection timed out')), 5000);
+      socket.addEventListener('open', () => { clearTimeout(timeout); resolve(); }, { once: true });
+      socket.addEventListener('error', () => { clearTimeout(timeout); reject(new Error('DevTools connection failed')); }, { once: true });
     });
-    matched = value === true;
-    if (!matched) await delay(100);
+
+    let nextID = 0;
+    function send(method, params = {}) {
+      const id = ++nextID;
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          socket.removeEventListener('message', receive);
+          reject(new Error('DevTools did not answer ' + method));
+        }, 5000);
+        function receive(event) {
+          const reply = JSON.parse(event.data);
+          if (reply.id !== id) return;
+          clearTimeout(timeout);
+          socket.removeEventListener('message', receive);
+          resolve(reply);
+        }
+        socket.addEventListener('message', receive);
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+    }
+    async function evaluate(fn, ...args) {
+      const expression = '(' + fn.toString() + ')(...' + JSON.stringify(args) + ')';
+      const reply = await send('Runtime.evaluate', { expression, returnByValue: true });
+      if (reply.result?.exceptionDetails) throw new Error('page script failed');
+      // Runtime.evaluate can briefly lose its execution context during a page transition.
+      return reply.result?.result?.value;
+    }
+    await check(evaluate, send);
+  } finally {
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ id: 99999, method: 'Browser.close' }));
+      socket.close();
+      await delay(200);
+    }
+    if (browser.exitCode === null) browser.kill();
   }
-  if (!matched) throw new Error('receipt detail was not rendered after form submission');
-} finally {
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ id: 99999, method: 'Browser.close' }));
-    socket.close();
-    await delay(200);
-  }
-  if (browser.exitCode === null) browser.kill();
 }
+
+async function waitForPage(label, check) {
+  for (let i = 0; i < 100; i++) {
+    const match = await check();
+    if (match) return match;
+    await delay(100);
+  }
+  throw new Error(label + ' was not observed in Edge');
+}
+`
+
+const receiptBrowserNavigation = edgeDevTools + `
+const [edge, profile, url, receiptID] = process.argv.slice(1);
+await withEdge(edge, profile, url, [], async (evaluate) => {
+  await waitForPage('receipt detail after submission', () => evaluate(id =>
+    new URLSearchParams(location.search).get('id') === id &&
+      document.querySelector('#receipt')?.innerText.includes('独立存证待确认'), receiptID));
+});
 `
 
 func serveBrowserTestPage(t *testing.T, mux *http.ServeMux, route, name, script string) {

@@ -51,6 +51,9 @@ jobs:
       - name: Exercise Service Control Manager
         shell: pwsh
         run: |
+          $env:BRIDGE_TEST_EDGE_BINARY = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'
+          if (-not (Test-Path -LiteralPath $env:BRIDGE_TEST_EDGE_BINARY -PathType Leaf)) { throw 'Edge was not found on the Windows runner.' }
+          if ((& node -p 'typeof WebSocket') -ne 'function') { throw 'Node.js must support built-in WebSocket.' }
           $bins = @{
             Executable = "$env:RUNNER_TEMP\bridge-scm-lab.exe"
             GiteaExecutable = "$env:RUNNER_TEMP\gitea-28.4.0.exe"

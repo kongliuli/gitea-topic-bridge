@@ -172,6 +172,11 @@ func checkGiteaGateway(t *testing.T, gitea, caddy, name string) {
 	if markdown := loadLabPage(t, browser, public+path+"?format=markdown", nil, 200); !strings.Contains(markdown, "CAD-HTTPS") {
 		t.Fatal("authorized Markdown download does not describe the original topic")
 	}
+	if os.Getenv("BRIDGE_TEST_EDGE_BINARY") != "" {
+		verifyGatewayInEdge(t, browser, edgeGatewayFixture{
+			Gateway: public, Password: password, Topic: topic.Topic, TopicID: topic.ID, ReceiptID: receiptID,
+		})
+	}
 }
 
 func issueSingleArtifactLabReceipt(t *testing.T, browser *http.Client, public, topic string, repository int64, key ed25519.PublicKey, digest string) string {

@@ -480,6 +480,10 @@ LEVEL = warn
     $clientFixture | ConvertTo-Json | Set-Content -LiteralPath $env:BRIDGE_TEST_SCM_STACK -Encoding utf8NoBOM
     & go test -v -timeout 2m -run '^TestSCMHostedStack$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted stack did not pass HTTPS acceptance.' }
+    if ($env:BRIDGE_TEST_EDGE_BINARY) {
+        & go test -v -timeout 2m -run '^TestSCMHostedStackEdge$' -count=1 .
+        if ($LASTEXITCODE -ne 0) { throw 'Edge could not use the real SCM-hosted HTTPS site.' }
+    }
     & go test -v -timeout 2m -run '^TestSCMServicePullMirror$' -count=1 .
     if ($LASTEXITCODE -ne 0) { throw 'The SCM-hosted Gitea mirror did not pass the outbound and read-only checks.' }
 

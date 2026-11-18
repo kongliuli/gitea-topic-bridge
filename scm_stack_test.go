@@ -135,14 +135,7 @@ func TestSCMHostedStackAfterRestore(t *testing.T) {
 func verifySCMStoredState(t *testing.T) (scmStackFixture, scmRestartEvidence) {
 	t.Helper()
 	fixture, evidencePath := loadSCMFixture(t)
-	raw, err := os.ReadFile(evidencePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var before scmRestartEvidence
-	if err := json.Unmarshal(raw, &before); err != nil {
-		t.Fatal("invalid original SCM evidence")
-	}
+	before := loadSCMEvidence(t, evidencePath)
 	browser := fixture.browser(t)
 	public := fixture.Gateway
 	waitForLabProcess(t, "the HTTPS gateway and Bridge", func() bool {
@@ -179,6 +172,19 @@ func verifySCMStoredState(t *testing.T) (scmStackFixture, scmRestartEvidence) {
 	}
 	verifySCMAnchorReplay(t, fixture, before.Receipt)
 	return fixture, before
+}
+
+func loadSCMEvidence(t *testing.T, path string) scmRestartEvidence {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence scmRestartEvidence
+	if err := json.Unmarshal(raw, &evidence); err != nil {
+		t.Fatal("invalid original SCM evidence")
+	}
+	return evidence
 }
 
 type scmStackFixture struct {
